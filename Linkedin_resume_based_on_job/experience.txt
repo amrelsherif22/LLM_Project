@@ -1,0 +1,59 @@
+Amr Elsherif
+914-661-1627 | amr22elsherif@gmail.com | linkedin | Phoenix, AZ
+Summary
+Backend Engineer with 4+ years of experience building scalable systems for financial platforms. Expertise in
+ensuring data consistency across distributed environments, developing secure APIs for cross-system
+synchronization, and automating workflows to strengthen validation and deployment processes. Focused on
+reliability-driven service design and performance optimization within complex backend architectures.
+Experience
+American Express
+Backend Software Engineer
+Aug 2022– Present
+Phoenix, AZ
+• Architected a cross-environment document replication system that replaced a 3-step manual promotion process
+with a single API call. Solved a firewall-blocked cross-environment communication problem by designing a Jenkins
+pipeline as a secure middleware bridge — eliminating direct environment-to-environment calls while restricting
+access via authenticated key-based authorization.
+• Built a self-service data management platform on Jenkins + GitHub that eliminated dependency on my team for
+environment data setup. Engineers provide only a document key — the pipeline fetches the document, surfaces it in
+GitHub for editing, then handles JWT auth, payload construction, and validated API submission to the target
+environment. Built-in approval gates enforce change control per request across all environments, replacing ad-hoc
+Postman-based requests that required manual team intervention.
+• Developed a batch processing service to decrypt and transform legacy SFTP file data into a normalized format
+consumable by the core financial platform, publishing records to Kafka and integrating with purpose-built receiving
+APIs to persist data for downstream transaction processing — spanning 4 interconnected systems.
+• Resolved 1,300+ production timeout incidents caused by synchronous back-to-back API payloads overwhelming the
+database during 60,000+ record legacy migrations. Refactored ingestion logic to async processing, implemented
+token bucket rate limiting to throttle database writes, and optimized queries with targeted indexing — eliminating
+timeout failures and restoring production stability.
+• Automated data validation workflows that replaced a fully manual verification process, reducing engineering effort
+from 40 hours per sprint to near zero while maintaining near-100% accuracy.
+• Designed an audit-logging mechanism that blocks consuming systems from updating data when they fall out of sync
+with the data-owning application, preventing incorrect approval or decline decisions caused by stale values.
+• Developed RESTful bulk-processing APIs to handle high-volume create, update, and delete operations,
+consolidating 30+ individual requests into a single batched request and significantly improving throughput for
+internal consumers.
+• Provided production support through root cause analysis and resolution of complex backend incidents,
+collaborating with UI and downstream teams to restore system stability. Led cross-team knowledge transfer
+sessions to improve technical alignment across systems.
+IEEE
+Software Developer
+Nov 2015– Nov 2016
+Ismailia, Egypt
+• Designed and developed embedded systems with tight hardware-software integration for remotely operated vehicle
+(ROV) control and communication.
+• Built a machine learning–based paint color classification model for accurate color identification and categorization.
+Education
+Stevens Institute of Technology
+Masters of Artificial Intelligence in Software engineering.
+Suez Canal University
+Bachelor of Engineering in Electronics and Communications.
+Technical Skills
+Hoboken, NJ
+GPA 3.945/4
+GPA 3.36/4
+Feb 2021– May 2022
+Ismailia, Egypt
+Sep 2014– May 2019
+Java, Python, Kafka, Vert.x, Spring Boot, NoSQL, SQL, RESTful APIs, Jenkins, Groovy, CI/CD Pipelines, Workflow
+Automation, Large Language Models, Prompt Engineering.
