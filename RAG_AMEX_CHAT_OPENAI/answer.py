@@ -1,61 +1,42 @@
 from pathlib import Path
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage, convert_to_messages
 from langchain_core.documents import Document
-
-from dotenv import load_dotenv
-
 
 load_dotenv(override=True)
 
 MODEL = "gpt-4.1-nano"
-DB_NAME = str(Path(__file__).parent.parent / "vector_db")
+DB_PATH = str(Path(__file__).parent.parent / "vector_db")
 
-# embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
-RETRIEVAL_K = 10
+vectorstore = Chroma(persist_directory=DB_PATH, embedding_function=embeddings)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+llm = ChatOpenAI(model_name=MODEL, temperature=0)
 
-SYSTEM_PROMPT = """
-You are a knowledgeable, friendly assistant representing the company American Express (amex for shortcut).
-You are chatting with a user about AMEX.
-If relevant, use the given context to answer any question.
-If you don't know the answer, say so.
+SYSTEM_PROMPT = """You are a knowledgeable, friendly assistant representing American Express (Amex).
+Use the context below to answer questions when relevant. If you don't know, say so.
+
 Context:
-{context}
-"""
-
-vectorstore = Chroma(persist_directory=DB_NAME, embedding_function=embeddings)
-retriever = vectorstore.as_retriever()
-llm = ChatOpenAI(temperature=0, model_name=MODEL)
+{context}"""
 
 
 def fetch_context(question: str) -> list[Document]:
-    """
-    Retrieve relevant context documents for a question.
-    """
-    return retriever.invoke(question, k=RETRIEVAL_K)
-
-
-def combined_question(question: str, history: list[dict] = []) -> str:
-    """
-    Combine all the user's messages into a single string.
-    """
-    prior = "\n".join(m["content"] for m in history if m["role"] == "user")
-    return prior + "\n" + question
+    combined = question
+    return retriever.invoke(combined)
 
 
 def answer_question(question: str, history: list[dict] = []) -> tuple[str, list[Document]]:
-    """
-    Answer the given question with RAG; return the answer and the context documents.
-    """
-    combined = combined_question(question, history)
-    docs = fetch_context(combined)
+    prior_text = "\n".join(m["content"] for m in history if m["role"] == "user")
+    query = (prior_text + "\n" + question).strip()
+
+    docs = retriever.invoke(query)
     context = "\n\n".join(doc.page_content for doc in docs)
-    system_prompt = SYSTEM_PROMPT.format(context=context)
-    messages = [SystemMessage(content=system_prompt)]
+
+    messages = [SystemMessage(content=SYSTEM_PROMPT.format(context=context))]
     messages.extend(convert_to_messages(history))
     messages.append(HumanMessage(content=question))
+
     response = llm.invoke(messages)
     return response.content, docs
