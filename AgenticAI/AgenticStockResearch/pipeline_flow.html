@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock Research Pipeline Flow</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #080c14;
+    --surface: #0d1420;
+    --border: #1a2540;
+    --accent: #00d4ff;
+    --accent2: #7c3aed;
+    --accent3: #10b981;
+    --accent4: #f59e0b;
+    --accent5: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    padding: 40px 20px 80px;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 60% 40% at 20% 10%, rgba(0,212,255,0.06) 0%, transparent 60%),
+      radial-gradient(ellipse 50% 50% at 80% 80%, rgba(124,58,237,0.07) 0%, transparent 60%);
+    pointer-events: none;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: clamp(1.4rem, 3vw, 2rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin-bottom: 6px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    text-align: center;
+    color: var(--muted);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.72rem;
+    margin-bottom: 50px;
+    letter-spacing: 0.1em;
+  }
+
+  .pipeline {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* ── SECTION LABEL ── */
+  .section-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    padding-left: 4px;
+  }
+
+  /* ── PARALLEL ROW ── */
+  .parallel-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 0;
+  }
+
+  /* ── AGENT CARD ── */
+  .agent-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 14px;
+    position: relative;
+    transition: transform 0.2s, border-color 0.2s;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .agent-card:hover {
+    transform: translateY(-2px);
+  }
+
+  .agent-card.tech   { border-top: 3px solid var(--accent);  animation-delay: 0.1s; }
+  .agent-card.energy { border-top: 3px solid var(--accent4); animation-delay: 0.2s; }
+  .agent-card.health { border-top: 3px solid var(--accent3); animation-delay: 0.3s; }
+  .agent-card.macro  { border-top: 3px solid var(--accent2); animation-delay: 0.4s; }
+
+  .agent-name {
+    font-weight: 800;
+    font-size: 0.78rem;
+    margin-bottom: 10px;
+    letter-spacing: -0.01em;
+  }
+
+  .agent-card.tech   .agent-name { color: var(--accent); }
+  .agent-card.energy .agent-name { color: var(--accent4); }
+  .agent-card.health .agent-name { color: var(--accent3); }
+  .agent-card.macro  .agent-name { color: var(--accent2); }
+
+  .agent-desc {
+    font-size: 0.68rem;
+    color: var(--muted);
+    line-height: 1.5;
+    margin-bottom: 12px;
+  }
+
+  /* ── TOOL PILLS ── */
+  .tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .tool-pill {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.58rem;
+    padding: 3px 7px;
+    border-radius: 4px;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+
+  .tool-pill.data   { color: var(--accent);  border-color: rgba(0,212,255,0.3);  background: rgba(0,212,255,0.05); }
+  .tool-pill.news   { color: #a78bfa;        border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.05); }
+  .tool-pill.tech2  { color: var(--accent4); border-color: rgba(245,158,11,0.3);  background: rgba(245,158,11,0.05); }
+  .tool-pill.green  { color: var(--accent3); border-color: rgba(16,185,129,0.3);  background: rgba(16,185,129,0.05); }
+
+  /* ── ARROW ── */
+  .arrow-down {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 14px 0;
+    gap: 0;
+  }
+
+  .arrow-line {
+    width: 2px;
+    height: 28px;
+    background: linear-gradient(to bottom, var(--border), var(--accent));
+  }
+
+  .arrow-head {
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 9px solid var(--accent);
+  }
+
+  .arrow-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    margin-top: 6px;
+  }
+
+  /* ── CONVERGENCE ── */
+  .converge-wrapper {
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+    margin-bottom: 0;
+  }
+
+  .converge-lines {
+    width: 100%;
+    height: 50px;
+    position: relative;
+    margin-bottom: -2px;
+  }
+
+  .converge-lines svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  /* ── PICKER CARD ── */
+  .picker-card {
+    background: linear-gradient(135deg, #0d1420 0%, #111827 100%);
+    border: 1px solid rgba(0,212,255,0.25);
+    border-radius: 14px;
+    padding: 22px 24px;
+    max-width: 600px;
+    margin: 0 auto;
+    width: 100%;
+    position: relative;
+    animation: fadeUp 0.5s 0.6s ease both;
+    box-shadow: 0 0 40px rgba(0,212,255,0.08);
+  }
+
+  .picker-card::before {
+    content: 'DECISION ENGINE';
+    position: absolute;
+    top: -10px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+    color: var(--accent);
+    background: var(--bg);
+    padding: 0 10px;
+  }
+
+  .picker-name {
+    font-weight: 800;
+    font-size: 1rem;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+
+  .picker-desc {
+    font-size: 0.72rem;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-bottom: 14px;
+  }
+
+  .weighs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .weigh-tag {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    padding: 4px 9px;
+    border-radius: 20px;
+    background: rgba(0,212,255,0.08);
+    border: 1px solid rgba(0,212,255,0.2);
+    color: var(--accent);
+  }
+
+  /* ── HANDOFF ── */
+  .handoff-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 10px 20px;
+    border: 1px dashed rgba(124,58,237,0.4);
+    border-radius: 8px;
+    max-width: 400px;
+    margin: 0 auto;
+    animation: fadeUp 0.5s 0.9s ease both;
+  }
+
+  .handoff-icon {
+    font-size: 1rem;
+  }
+
+  .handoff-text {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.62rem;
+    color: #a78bfa;
+    letter-spacing: 0.08em;
+  }
+
+  /* ── OUTPUT CARD ── */
+  .output-card {
+    background: linear-gradient(135deg, #0a1a0f 0%, #0d1a12 100%);
+    border: 1px solid rgba(16,185,129,0.3);
+    border-radius: 14px;
+    padding: 20px 24px;
+    max-width: 500px;
+    margin: 0 auto;
+    width: 100%;
+    text-align: center;
+    animation: fadeUp 0.5s 1.1s ease both;
+    box-shadow: 0 0 30px rgba(16,185,129,0.06);
+  }
+
+  .output-card::before {
+    content: 'HANDOFF AGENT';
+    display: block;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.2em;
+    color: var(--accent3);
+    margin-bottom: 8px;
+  }
+
+  .output-name {
+    font-weight: 800;
+    font-size: 0.95rem;
+    color: var(--accent3);
+    margin-bottom: 6px;
+  }
+
+  .output-desc {
+    font-size: 0.7rem;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-bottom: 12px;
+  }
+
+  .tool-pill.browser { color: var(--accent3); border-color: rgba(16,185,129,0.3); background: rgba(16,185,129,0.05); }
+
+  /* ── FINAL OUTPUT ── */
+  .final-output {
+    max-width: 500px;
+    margin: 0 auto;
+    background: linear-gradient(90deg, rgba(16,185,129,0.1), rgba(0,212,255,0.1));
+    border: 1px solid rgba(16,185,129,0.2);
+    border-radius: 10px;
+    padding: 14px 20px;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--accent3);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    animation: fadeUp 0.5s 1.3s ease both;
+  }
+
+  /* ── LEGEND ── */
+  .legend {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 50px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.68rem;
+    color: var(--muted);
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .parallel-label {
+    text-align: center;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--muted);
+    letter-spacing: 0.15em;
+    margin-bottom: 10px;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .center-wrap {
+    display: flex;
+    justify-content: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>Stock Research Pipeline</h1>
+<p class="subtitle">AGENTIC AI FLOW — TOOLS · AGENTS · HANDOFFS</p>
+
+<div class="pipeline">
+
+  <!-- STEP 1: PARALLEL AGENTS -->
+  <div class="parallel-label">① PARALLEL EXECUTION — all 4 run simultaneously via asyncio.gather</div>
+
+  <div class="parallel-row">
+
+    <div class="agent-card tech">
+      <div class="agent-name">TechSectorAnalyst</div>
+      <div class="agent-desc">Researches AI, semiconductors, cloud & software stocks. Scores 3–5 picks with conviction 1–10.</div>
+      <div class="tools">
+        <span class="tool-pill news">fetch_market_news</span>
+        <span class="tool-pill data">fetch_stock_quote</span>
+        <span class="tool-pill data">fetch_stock_overview</span>
+        <span class="tool-pill data">fetch_rsi_signal</span>
+        <span class="tool-pill data">fetch_earnings_calendar</span>
+        <span class="tool-pill tech2">fetch_top_gainers_losers</span>
+      </div>
+    </div>
+
+    <div class="agent-card energy">
+      <div class="agent-name">EnergySectorAnalyst</div>
+      <div class="agent-desc">Covers oil, gas, renewables & utilities. Finds momentum names from gainers list + fundamentals.</div>
+      <div class="tools">
+        <span class="tool-pill news">fetch_market_news</span>
+        <span class="tool-pill data">fetch_stock_quote</span>
+        <span class="tool-pill data">fetch_stock_overview</span>
+        <span class="tool-pill data">fetch_rsi_signal</span>
+        <span class="tool-pill data">fetch_earnings_calendar</span>
+        <span class="tool-pill tech2">fetch_top_gainers_losers</span>
+      </div>
+    </div>
+
+    <div class="agent-card health">
+      <div class="agent-name">HealthcareSectorAnalyst</div>
+      <div class="agent-desc">Targets biotech, pharma & medtech. Flags FDA catalysts, EPS surprises, and RSI entries.</div>
+      <div class="tools">
+        <span class="tool-pill news">fetch_market_news</span>
+        <span class="tool-pill data">fetch_stock_quote</span>
+        <span class="tool-pill data">fetch_stock_overview</span>
+        <span class="tool-pill data">fetch_rsi_signal</span>
+        <span class="tool-pill data">fetch_earnings_calendar</span>
+        <span class="tool-pill tech2">fetch_top_gainers_losers</span>
+      </div>
+    </div>
+
+    <div class="agent-card macro">
+      <div class="agent-name">MacroNewsAnalyst</div>
+      <div class="agent-desc">Reads Fed, inflation & S&P outlook news. Outputs market sentiment + sector tailwinds for tomorrow.</div>
+      <div class="tools">
+        <span class="tool-pill news">fetch_market_news</span>
+        <span class="tool-pill tech2">fetch_top_gainers_losers</span>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ARROW DOWN -->
+  <div class="arrow-down">
+    <div class="arrow-line"></div>
+    <div class="arrow-head"></div>
+    <div class="arrow-label">all 4 outputs combined into one prompt</div>
+  </div>
+
+  <!-- STEP 2: PICKER -->
+  <div class="center-wrap" style="margin-bottom:0">
+    <div class="picker-card">
+      <div class="picker-name">Top5StockPicker</div>
+      <div class="picker-desc">
+        Senior portfolio manager agent. Receives all sector research + macro backdrop.
+        Cross-compares every stock across sectors and selects the <strong style="color:var(--accent)">top 5</strong> with price, thesis, risk, entry strategy, and conviction. Outputs a styled HTML report.
+      </div>
+      <div class="weighs">
+        <span class="weigh-tag">News Catalysts</span>
+        <span class="weigh-tag">PE / EPS</span>
+        <span class="weigh-tag">Analyst Target</span>
+        <span class="weigh-tag">RSI Signal</span>
+        <span class="weigh-tag">Earnings Surprise</span>
+        <span class="weigh-tag">Volume / Momentum</span>
+        <span class="weigh-tag">Macro Fit</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ARROW + HANDOFF LABEL -->
+  <div class="arrow-down">
+    <div class="arrow-line" style="background: linear-gradient(to bottom, var(--border), #a78bfa)"></div>
+    <div class="arrow-head" style="border-top-color: #a78bfa"></div>
+  </div>
+
+  <div class="center-wrap" style="margin-bottom: 0">
+    <div class="handoff-banner">
+      <span class="handoff-icon">🔀</span>
+      <span class="handoff-text">HANDOFF — HTML report passed to ReportOpener</span>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <div class="arrow-line" style="background: linear-gradient(to bottom, #a78bfa, var(--accent3))"></div>
+    <div class="arrow-head" style="border-top-color: var(--accent3)"></div>
+  </div>
+
+  <!-- STEP 3: OPENER -->
+  <div class="center-wrap" style="margin-bottom: 0">
+    <div class="output-card">
+      <div class="output-name">ReportOpener</div>
+      <div class="output-desc">Receives the finished HTML from the picker. Calls <code style="color:var(--accent3)">open_report_in_browser</code> exactly once — saves report to temp file and launches it in your default browser.</div>
+      <div class="tools" style="justify-content:center">
+        <span class="tool-pill browser">open_report_in_browser</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ARROW -->
+  <div class="arrow-down">
+    <div class="arrow-line" style="background: linear-gradient(to bottom, var(--accent3), #34d399)"></div>
+    <div class="arrow-head" style="border-top-color: #34d399"></div>
+  </div>
+
+  <!-- FINAL -->
+  <div class="final-output">
+    ✅ &nbsp; HTML report opens in browser — Top 5 stock picks with full analysis
+  </div>
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> Data tool (Alpha Vantage)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> News tool (NewsAPI)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent4)"></div> Market momentum tool</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent3)"></div> Output / browser tool</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent2); border-radius:50%"></div> Handoff</div>
+  </div>
+
+</div>
+</body>
+</html>
