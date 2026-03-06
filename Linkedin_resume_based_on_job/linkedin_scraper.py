@@ -6,7 +6,6 @@ from typing import Optional
 import time
 import re
 
-# ── Standard headers ──────────────────────────────────────────────────────────
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -16,7 +15,6 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Data model ────────────────────────────────────────────────────────────────
 @dataclass
 class LinkedInJob:
     title: str
@@ -28,7 +26,7 @@ class LinkedInJob:
     benefits: list[str] = field(default_factory=list)
     job_id: Optional[str] = None
     description: Optional[str] = None
-    full_description: Optional[str] = None  # ✅ Full multi-section description
+    full_description: Optional[str] = None 
 
     def __str__(self) -> str:
         lines = [
@@ -55,7 +53,6 @@ class LinkedInJob:
         return output
 
 
-# ── Core helpers ──────────────────────────────────────────────────────────────
 def _extract_params_from_linkedin_url(url: str) -> dict:
     parsed = urlparse(url)
     qs = parse_qs(parsed.query)
@@ -134,7 +131,6 @@ def _extract_full_description(soup: BeautifulSoup) -> Optional[str]:
     Tries multiple selectors to handle LinkedIn's various HTML structures.
     """
     try:
-        # Primary selector: the main description container
         desc_container = (
             soup.select_one("div.show-more-less-html__markup")
             or soup.select_one("div.description__text")
@@ -142,17 +138,14 @@ def _extract_full_description(soup: BeautifulSoup) -> Optional[str]:
         )
 
         if desc_container:
-            # Get all text, preserving some structure
             text = desc_container.get_text("\n", strip=True)
             return _clean_text(text)
 
-        # Fallback: look for article or main content area
         article = soup.select_one("article") or soup.select_one("main")
         if article:
             text = article.get_text("\n", strip=True)
             return _clean_text(text)
 
-        # Last resort: grab everything except nav/footer
         for unwanted in soup.select("nav, footer, aside, script, style"):
             unwanted.decompose()
 
@@ -178,7 +171,6 @@ def _fetch_job_description(
     try:
         html = None
 
-        # Attempt 1: LinkedIn guest API endpoint (returns HTML fragment)
         if job.job_id:
             details_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job.job_id}"
             try:
@@ -188,7 +180,6 @@ def _fetch_job_description(
             except Exception as e:
                 print(f"[!] Failed to fetch from guest API for job {job.job_id}: {e}")
 
-        # Attempt 2: Fetch from job URL directly
         if not html and job.job_url:
             try:
                 r = session.get(
@@ -215,7 +206,6 @@ def _fetch_job_description(
         return None
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
 def fetch_linkedin_jobs(
     url: str,
     max_jobs: int = 25,
@@ -241,7 +231,6 @@ def fetch_linkedin_jobs(
     start = 0
 
     with requests.Session() as session:
-        # Fetch job listings
         while len(jobs) < max_jobs:
             api_url = _build_guest_api_url(params, start=start)
             resp = session.get(api_url, headers=HEADERS, timeout=10)
@@ -265,7 +254,6 @@ def fetch_linkedin_jobs(
             start += len(cards)
             time.sleep(delay)
 
-        # Fetch full descriptions
         if include_description:
             print(f"\n[*] Fetching descriptions for {len(jobs)} jobs...")
             for i, job in enumerate(jobs, start=1):
@@ -305,7 +293,6 @@ def save_jobs_to_file(jobs: list[LinkedInJob], filename: str = "jobs.txt") -> No
     print(f"[✓] Jobs saved to {filename}")
 
 
-# ── Example usage ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     LINKEDIN_URL = (
         "https://www.linkedin.com/jobs/search/?alertAction=viewjobs&currentJobId=4374547986&f_TPR=r8600&geoId=105080838&keywords=Software%20Engineer&origin=JOB_SEARCH_PAGE_JOB_FILTER&refresh=true&sortBy=R"
@@ -313,14 +300,12 @@ if __name__ == "__main__":
 
     jobs = fetch_linkedin_jobs(
         LINKEDIN_URL,
-        max_jobs=5,  # Start with fewer for testing
+        max_jobs=5,  
         include_description=True,
         delay=1.0,
         desc_delay=0.8,
     )
 
-    # Print to console
     print_jobs(jobs, include_full_description=True)
 
-    # Also save to file
     save_jobs_to_file(jobs, filename="linkedin_jobs_with_descriptions.txt")

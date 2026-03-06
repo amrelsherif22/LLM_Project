@@ -7,7 +7,6 @@ for each job that I'm a high match should come with saying for this specific job
 you should immedietly return a full tailored experience adjustments either new, remove, or keep on each job recommended"""
 with open("experience.txt") as r:
     text = r.read()
-    # Replace problematic bullet and dash characters that appear as 'â€¢' and 'â€“'
     text = text.replace('â€¢', '•').replace('â€”', '-').replace("â€“", "-")
     resume = text.encode("utf-8", errors="replace").decode("utf-8").splitlines()
 resume_str = "\n".join(resume)
@@ -19,7 +18,7 @@ LINKEDIN_URL = (
 
 jobs =fetch_linkedin_jobs(
         LINKEDIN_URL,
-        max_jobs=50,  # Start with fewer for testing
+        max_jobs=50, 
         include_description=True,
         delay=1.0,
         desc_delay=0.8,
@@ -55,7 +54,7 @@ import gradio as gr
 
 gr.Interface(
     fn=get_job,
-    inputs=None,  # no user inputs, just a button
+    inputs=None, 
     outputs=gr.Markdown(label="Response"),
     flagging_mode="never",
 ).launch()

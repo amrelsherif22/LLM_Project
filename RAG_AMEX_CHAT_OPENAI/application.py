@@ -7,7 +7,6 @@ from evaluation.evaluation import evaluate_all_retrieval, evaluate_all_answers
 
 load_dotenv(override=True)
 
-# Color coding thresholds - Retrieval
 MRR_GREEN = 0.9
 MRR_AMBER = 0.75
 NDCG_GREEN = 0.9
@@ -15,7 +14,6 @@ NDCG_AMBER = 0.75
 COVERAGE_GREEN = 90.0
 COVERAGE_AMBER = 75.0
 
-# Color coding thresholds - Answer (1-5 scale)
 ANSWER_GREEN = 4.5
 ANSWER_AMBER = 4.0
 
@@ -100,7 +98,6 @@ def run_retrieval_evaluation(progress=gr.Progress()):
     avg_ndcg = total_ndcg / count
     avg_coverage = total_coverage / count
 
-    # Create final summary metrics HTML
     final_html = f"""
     <div style="padding: 0;">
         {format_metric_html("Mean Reciprocal Rank (MRR)", avg_mrr, "mrr")}
@@ -112,7 +109,6 @@ def run_retrieval_evaluation(progress=gr.Progress()):
     </div>
     """
 
-    # Create final bar chart data
     category_data = []
     for category, mrr_scores in category_mrr.items():
         avg_cat_mrr = sum(mrr_scores) / len(mrr_scores)

@@ -50,7 +50,7 @@ def calculate_mrr(keyword: str, retrieved_docs: list) -> float:
 def calculate_dcg(relevances: list[int], k: int) -> float:
     dcg = 0.0
     for i in range(min(k, len(relevances))):
-        dcg += relevances[i] / math.log2(i + 2)  # i+2 because rank starts at 1
+        dcg += relevances[i] / math.log2(i + 2)  
     return dcg
 
 
@@ -61,7 +61,6 @@ def calculate_ndcg(keyword: str, retrieved_docs: list, k: int = 10) -> float:
         1 if keyword_lower in doc.page_content.lower() else 0 for doc in retrieved_docs[:k]
     ]
 
-    # DCG
     dcg = calculate_dcg(relevances, k)
 
     ideal_relevances = sorted(relevances, reverse=True)
@@ -157,7 +156,6 @@ def run_cli_evaluation(test_number: int):
 
     test = tests[test_number]
 
-    # Print test info
     print(f"\n{'=' * 80}")
     print(f"Test #{test_number}")
     print(f"{'=' * 80}")
@@ -166,7 +164,6 @@ def run_cli_evaluation(test_number: int):
     print(f"Category: {test.category}")
     print(f"Reference Answer: {test.reference_answer}")
 
-    # Retrieval Evaluation
     print(f"\n{'=' * 80}")
     print("Retrieval Evaluation")
     print(f"{'=' * 80}")
@@ -178,7 +175,6 @@ def run_cli_evaluation(test_number: int):
     print(f"Keywords Found: {retrieval_result.keywords_found}/{retrieval_result.total_keywords}")
     print(f"Keyword Coverage: {retrieval_result.keyword_coverage:.1f}%")
 
-    # Answer Evaluation
     print(f"\n{'=' * 80}")
     print("Answer Evaluation")
     print(f"{'=' * 80}")
