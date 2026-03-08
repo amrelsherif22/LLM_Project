@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import tempfile
 import time
 import urllib.parse
@@ -10,7 +11,7 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import yfinance as yf
 from dotenv import load_dotenv
@@ -33,8 +34,9 @@ from agents.exceptions import (
 )
 
 
-load_dotenv(override=True)
+# ── CONFIG & CONSTANTS ────────────────────────────────────────────────────────
 
+load_dotenv(override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +51,45 @@ CUTOFF_48H: str   = (
     datetime.now(timezone.utc) - timedelta(hours=48)
 ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SECTOR_LAUNCH_DELAYS = [0, 20, 40]
 
+SP500_BY_SECTOR: Dict[str, List[str]] = {
+    "technology":  ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AVGO", "ORCL", "CRM", "AMD", "ADBE"],
+    "energy":      ["XOM", "CVX", "COP", "EOG", "SLB", "PSX", "MPC", "VLO", "OXY", "HAL"],
+    "healthcare":  ["JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY", "AMGN", "ISRG"],
+    "finance":     ["BRK-B", "JPM", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP", "C"],
+    "consumer":    ["AMZN", "TSLA", "WMT", "COST", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW"],
+    "industrial":  ["HON", "CAT", "DE", "LMT", "RTX", "GE", "UPS", "FDX", "EMR", "ETN"],
+}
+
+SECTOR_RULES = (
+    "\n\n── DATA RULES (non-negotiable) ──"
+    "\n1. Call resolve_ticker(name) before ANY other tool for every company."
+    "\n2. Use ONLY the ticker resolve_ticker returns. Never guess."
+    "\n3. If resolve_ticker returns INVALID → skip that company, try another."
+    "\n4. FALLBACK: If fewer than 3 tickers verified from news:"
+    "\n   Call fetch_sp500_sector_tickers(your_sector) and resolve_ticker on each."
+    "\n   Keep going until you have AT LEAST 4 verified tickers."
+    "\n   This is mandatory — you MUST always deliver at least 3 candidates."
+    "\n5. Prices MUST come from fetch_stock_quote. Never invent numbers."
+    "\n6. Names MUST come from resolve_ticker. Never invent names."
+
+    "\n\n── SELECTION CRITERIA ──"
+    "\nAVOID: RSI > 65 (overbought)"
+    "\nAVOID: FALLING SMA or price below 50-day SMA"
+    "\nAVOID: BEARISH MACD"
+    "\nAVOID: Any ticker on the exclusion list"
+    "\nTARGET: RSI 30-55 | RISING SMA | Price ABOVE SMA | BULLISH MACD | Analyst target ≥5% upside"
+    "\nIf no stock meets all criteria, pick the best available — ALWAYS return at least 3."
+
+    "\n\n── OUTPUT FORMAT ──"
+    "\nFor each candidate return:"
+    "\n  ticker | name | price | RSI | SMA verdict | MACD | analyst target | upside%"
+    "\n  | EPS | news catalyst | thesis | risk | conviction 1-10"
+)
+
+
+# ── MONITORING ────────────────────────────────────────────────────────────────
 
 @dataclass
 class StepRecord:
@@ -64,26 +104,23 @@ class PipelineMonitor:
     run_id:       str              = field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
     records:      List[StepRecord] = field(default_factory=list)
     judge_scores: List[int]        = field(default_factory=list)
-    _timers:      Dict[str, float] = field(default_factory=dict)
+    timers:      Dict[str, float] = field(default_factory=dict)
 
     def start(self, name: str) -> None:
-        self._timers[name] = time.monotonic()
+        self.timers[name] = time.monotonic()
         self.records.append(StepRecord(name=name, status="start"))
-        log.info("▶  %s", name)
 
     def ok(self, name: str, detail: str = "") -> None:
-        duration = time.monotonic() - self._timers.get(name, time.monotonic())
+        duration = time.monotonic() - self.timers.get(name, time.monotonic())
         self.records.append(StepRecord(name=name, status="ok", duration=duration, detail=detail))
-        log.info("✓  %s  (%.1fs)  %s", name, duration, detail)
 
     def err(self, name: str, detail: str = "") -> None:
-        duration = time.monotonic() - self._timers.get(name, time.monotonic())
+        duration = time.monotonic() - self.timers.get(name, time.monotonic())
         self.records.append(StepRecord(name=name, status="err", duration=duration, detail=detail))
         log.error("✗  %s  (%.1fs)  %s", name, duration, detail)
 
     def judge_scored(self, score: int) -> None:
         self.judge_scores.append(score)
-        log.info("⚖  Judge score: %d/10", score)
 
     def summary(self) -> None:
         ok_steps  = [r for r in self.records if r.status == "ok"]
@@ -112,7 +149,6 @@ class PipelineMonitor:
                     "judge_scores": self.judge_scores,
                     "steps":        [r.__dict__ for r in self.records],
                 }, f, indent=2)
-            log.info("Run log saved → %s", log_path)
         except Exception as e:
             log.warning("Could not save run log: %s", e)
 
@@ -120,75 +156,48 @@ class PipelineMonitor:
 monitor = PipelineMonitor()
 
 
-_LAST_YF_CALL: float = 0.0
-_YF_MIN_GAP:   float = 0.35
+# ── YFINANCE HELPERS ──────────────────────────────────────────────────────────
+
+LAST_YF_CALL: float = 0.0
+YF_MIN_GAP:   float = 0.35
 
 
-def _throttle() -> None:
-    global _LAST_YF_CALL
-    gap = time.monotonic() - _LAST_YF_CALL
-    if gap < _YF_MIN_GAP:
-        time.sleep(_YF_MIN_GAP - gap)
-    _LAST_YF_CALL = time.monotonic()
+def throttle() -> None:
+    global LAST_YF_CALL
+    gap = time.monotonic() - LAST_YF_CALL
+    if gap < YF_MIN_GAP:
+        time.sleep(YF_MIN_GAP - gap)
+    LAST_YF_CALL = time.monotonic()
 
 
-def _yf_info(ticker: str, retries: int = 3) -> dict:
-
+def yf_info(ticker: str, retries: int = 3) -> dict:
     delay = 1.5
     for attempt in range(retries):
-        _throttle()
+        throttle()
         try:
             return yf.Ticker(ticker).info or {}
         except Exception as exc:
-            log.warning("yf.info attempt %d/%d for %s: %s", attempt + 1, retries, ticker, exc)
             if attempt < retries - 1:
                 time.sleep(delay + random.uniform(0, 0.5))
                 delay *= 2
     return {}
 
 
-def _yf_hist(ticker: str, period: str, retries: int = 3):
-
+def yf_hist(ticker: str, period: str, retries: int = 3):
     import pandas as pd
     delay = 1.5
     for attempt in range(retries):
-        _throttle()
+        throttle()
         try:
             return yf.Ticker(ticker).history(period=period, auto_adjust=True)
         except Exception as exc:
-            log.warning("yf.hist attempt %d/%d for %s (%s): %s", attempt + 1, retries, ticker, period, exc)
             if attempt < retries - 1:
                 time.sleep(delay + random.uniform(0, 0.5))
                 delay *= 2
     return pd.DataFrame()
 
 
-
-SECTOR_LAUNCH_DELAYS = [0, 8, 16]
-
-
-async def _run_with_429_retry(agent, prompt: str, max_turns: int, label: str,
-                               max_retries: int = 4) -> str:
-
-    delay = 15.0
-    for attempt in range(max_retries + 1):
-        try:
-            result = await Runner.run(agent, prompt, max_turns=max_turns)
-            return result.final_output
-        except Exception as exc:
-            err_str = str(exc)
-            is_429  = "429" in err_str or "rate limit" in err_str.lower()
-            if is_429 and attempt < max_retries:
-                wait = delay + random.uniform(0, delay * 0.3)
-                log.warning(
-                    "429 rate limit on %s (attempt %d/%d) — waiting %.0fs before retry",
-                    label, attempt + 1, max_retries + 1, wait
-                )
-                await asyncio.sleep(wait)
-                delay *= 2
-            else:
-                raise
-
+# ── SCHEMAS ───────────────────────────────────────────────────────────────────
 
 class RsiResult(BaseModel):
     ticker:    str
@@ -216,196 +225,18 @@ class JudgeVerdict(BaseModel):
     critique:        str    # Specific issues to fix — fed back to the Picker on retry
 
 
-input_guardrail_agent = Agent(
-    name="InputGuardrailAgent",
-    instructions=(
-        "You validate user requests for a stock research tool. "
-        "Approve (is_valid=True) anything related to: stocks, investing, markets, "
-        "financial research, trading, portfolio analysis, earnings, or macro economy. "
-        "Reject (is_valid=False) ONLY if the request has nothing to do with finance "
-        "(e.g. recipes, essays) OR explicitly asks for something illegal like insider trading. "
-        "When in doubt — approve."
-    ),
-    output_type=InputValidation,
-    model="gpt-4o-mini",
-)
-
-output_guardrail_agent = Agent(
-    name="OutputGuardrailAgent",
-    instructions=(
-        "You review an HTML stock research report. "
-        "Return is_valid=False ONLY if the report is completely empty "
-        "or contains nothing but unfilled placeholder text like '[Insert X here]'. "
-        "Return is_valid=True if the report contains ANY real ticker symbol "
-        "(AAPL, MSFT, NVDA, XOM, etc.) — even if some data is missing or partial. "
-        "Your only job is to catch a completely broken/unrendered template."
-    ),
-    output_type=OutputValidation,
-    model="gpt-4o-mini",
-)
-
-
-@input_guardrail
-async def stock_research_input_guardrail(
-    ctx: RunContextWrapper, agent: Agent, input: str
-) -> GuardrailFunctionOutput:
-    result     = await Runner.run(input_guardrail_agent, input, context=ctx.context)
-    validation = result.final_output
-    log.info("Input guardrail: is_valid=%s | %s", validation.is_valid, validation.reason)
-    return GuardrailFunctionOutput(
-        output_info=validation,
-        tripwire_triggered=not validation.is_valid,
-    )
-
-
-@output_guardrail
-async def stock_report_output_guardrail(
-    ctx: RunContextWrapper, agent: Agent, output: str
-) -> GuardrailFunctionOutput:
-    preview    = output[:2000]
-    result     = await Runner.run(output_guardrail_agent, preview, context=ctx.context)
-    validation = result.final_output
-    log.info("Output guardrail: is_valid=%s | %s", validation.is_valid, validation.reason)
-    return GuardrailFunctionOutput(
-        output_info=validation,
-        tripwire_triggered=not validation.is_valid,
-    )
-judge_agent = Agent(
-    name="ReportJudge",
-    instructions=(
-        "You are a quality judge for AI-generated stock research reports. "
-        "You will receive a finished HTML stock report. "
-
-        "Check these four things and fill in the structured fields: "
-
-        "1. has_min_picks: Does the report contain at least 3 real stock picks "
-        "   with actual ticker symbols (AAPL, MSFT, etc.)? Set True if yes. "
-
-        "2. prices_present: Does every pick have a real dollar price like $213.49? "
-        "   Set False if any pick is missing a price or shows 'N/A' for price. "
-
-        "3. no_placeholders: Is the report free of '[Insert X]' style text? "
-        "   Set True if there are no unfilled placeholders. "
-
-        "4. score: Rate overall quality 1-10. "
-        "   10 = perfect professional report. "
-        "   7  = acceptable — picks present, prices real, theses make sense. "
-        "   4  = poor — missing picks, missing prices, or all generic vague text. "
-        "   1  = completely useless or empty. "
-
-        "Set approved=True ONLY when ALL of these are true: "
-        "score >= 7 AND has_min_picks=True AND prices_present=True AND no_placeholders=True. "
-
-        "In critique: list the SPECIFIC problems found. Be direct and brief. "
-        "Example: 'Pick 3 (XOM) is missing a price. Pick 5 thesis is generic filler.' "
-        "If approved, set critique to empty string."
-    ),
-    output_type=JudgeVerdict,
-    model="gpt-4o-mini",
-)
-
-
-async def run_with_judge(combined_research: str, max_retries: int = 2) -> str:
-
-    best_report: str = ""
-    best_score:  int = 0
-    critique:    str = ""
-
-    for attempt in range(max_retries + 1):
-        label = f"attempt {attempt + 1}/{max_retries + 1}"
-        log.info("Picker %s", label)
-        monitor.start(f"picker_{label}")
-
-        picker_prompt = combined_research
-        if critique:
-            picker_prompt += (
-                f"\n\n⚠️  JUDGE FEEDBACK — FIX THESE IN THIS ATTEMPT:\n{critique}\n"
-                f"REMINDER: The report MUST contain AT LEAST 3 complete stock picks, "
-                f"each with a real dollar price."
-            )
-
-        try:
-            result      = await Runner.run(top5_stock_picker, picker_prompt, max_turns=25)
-            html_report = result.final_output
-            monitor.ok(f"picker_{label}", "HTML generated")
-        except OutputGuardrailTripwireTriggered as e:
-
-            monitor.err(f"picker_{label}", f"OutputGuardrail fired: {e}")
-            log.warning(
-                "Output guardrail fired on %s — Picker produced an empty/broken report. "
-                "Will retry with stronger instructions.", label
-            )
-            critique = (
-                (critique + "\n" if critique else "") +
-                "CRITICAL: Your previous response was rejected as empty or unrendered. "
-                "You MUST output a complete HTML page starting with <!DOCTYPE html> "
-                "containing at least 3 real stock picks with real dollar prices. "
-                "Do NOT output plain text. Do NOT output an explanation. Output ONLY the HTML."
-            )
-            continue
-        except Exception as e:
-            monitor.err(f"picker_{label}", str(e))
-            log.error("Picker failed on %s: %s", label, e)
-            continue
-
-        log.info("Sending report to Judge (%s)", label)
-        monitor.start(f"judge_{label}")
-        try:
-            judge_result = await Runner.run(judge_agent, html_report, max_turns=5)
-            verdict: JudgeVerdict = judge_result.final_output
-            monitor.ok(f"judge_{label}", f"score={verdict.score}")
-        except Exception as e:
-            monitor.err(f"judge_{label}", str(e))
-            log.warning("Judge itself failed on %s — using report anyway: %s", label, e)
-            return html_report
-
-        monitor.judge_scored(verdict.score)
-
-        if verdict.score > best_score:
-            best_score  = verdict.score
-            best_report = html_report
-
-        if verdict.approved:
-            log.info("✅ Judge approved on %s (score=%d/10)", label, verdict.score)
-            return best_report
-
-        log.warning(
-            "Judge rejected on %s (score=%d/10). Issues: %s",
-            label, verdict.score, verdict.critique[:200]
-        )
-        critique = verdict.critique
-
-    log.warning(
-        "Max retries reached. Using best report (score=%d/10). "
-        "Report will still have picks even if imperfect.",
-        best_score
-    )
-    return best_report
-
-
-
-SP500_BY_SECTOR: Dict[str, List[str]] = {
-    "technology":  ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AVGO", "ORCL", "CRM", "AMD", "ADBE"],
-    "energy":      ["XOM", "CVX", "COP", "EOG", "SLB", "PSX", "MPC", "VLO", "OXY", "HAL"],
-    "healthcare":  ["JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY", "AMGN", "ISRG"],
-    "finance":     ["BRK-B", "JPM", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP", "C"],
-    "consumer":    ["AMZN", "TSLA", "WMT", "COST", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW"],
-    "industrial":  ["HON", "CAT", "DE", "LMT", "RTX", "GE", "UPS", "FDX", "EMR", "ETN"],
-}
-
+# ── TOOLS ─────────────────────────────────────────────────────────────────────
 
 @function_tool
 def resolve_ticker(company_name_or_ticker: str) -> str:
-
     raw = company_name_or_ticker.strip()
-    log.info("resolve_ticker('%s')", raw)
     try:
-        info   = _yf_info(raw)
+        info   = yf_info(raw)
         symbol = info.get("symbol", "")
         name   = info.get("shortName") or info.get("longName", "")
         sector = info.get("sector", "N/A")
 
-
+        hist  = yf_hist(symbol or raw, "2d")
         price = round(float(hist["Close"].iloc[-1]), 2) if not hist.empty else None
 
         if price is None:
@@ -434,7 +265,6 @@ def fetch_sp500_sector_tickers(sector: str) -> str:
     for k in SP500_BY_SECTOR:
         if k in key or key in k:
             tickers = SP500_BY_SECTOR[k]
-            log.info("fetch_sp500_sector_tickers('%s') → %d tickers", sector, len(tickers))
             return (
                 f"S&P 500 {k} tickers: {', '.join(tickers)}\n"
                 f"Run resolve_ticker on each, then the full analysis pipeline. "
@@ -484,10 +314,8 @@ def fetch_market_news(topic: str) -> str:
 
 @function_tool
 def fetch_stock_quote(verified_ticker: str) -> str:
-
-    log.info("fetch_stock_quote('%s')", verified_ticker)
     try:
-        hist = _yf_hist(verified_ticker, "5d")
+        hist = yf_hist(verified_ticker, "5d")
         if hist.empty:
             return f"No price data for {verified_ticker}."
         latest     = hist.iloc[-1]
@@ -510,15 +338,13 @@ def fetch_stock_quote(verified_ticker: str) -> str:
 
 @function_tool
 def fetch_stock_overview(verified_ticker: str) -> str:
-
-    log.info("fetch_stock_overview('%s')", verified_ticker)
     try:
-        info = _yf_info(verified_ticker)
+        info = yf_info(verified_ticker)
         if not info or not info.get("symbol"):
             return f"No fundamental data for {verified_ticker}."
         target = info.get("targetMeanPrice")
 
-        hist    = _yf_hist(verified_ticker, "2d")
+        hist    = yf_hist(verified_ticker, "2d")
         current = round(float(hist["Close"].iloc[-1]), 2) if not hist.empty else None
         if current is None:
             current = (
@@ -550,10 +376,8 @@ def fetch_stock_overview(verified_ticker: str) -> str:
 
 @function_tool
 def fetch_rsi_signal(verified_ticker: str) -> RsiResult:
-
-    log.info("fetch_rsi_signal('%s')", verified_ticker)
     try:
-        hist = _yf_hist(verified_ticker, "90d")
+        hist = yf_hist(verified_ticker, "90d")
         if hist.empty or len(hist) < 16:
             return RsiResult(ticker=verified_ticker, date="N/A", rsi_value=0.0,
                              signal="Not enough history (need 16+ days)")
@@ -578,10 +402,8 @@ def fetch_rsi_signal(verified_ticker: str) -> RsiResult:
 
 @function_tool
 def fetch_sma_trend(verified_ticker: str) -> str:
-
-    log.info("fetch_sma_trend('%s')", verified_ticker)
     try:
-        hist = _yf_hist(verified_ticker, "150d")
+        hist = yf_hist(verified_ticker, "150d")
         if hist.empty or len(hist) < 55:
             return f"Not enough data for SMA on {verified_ticker}"
         closes    = hist["Close"]
@@ -602,10 +424,8 @@ def fetch_sma_trend(verified_ticker: str) -> str:
 
 @function_tool
 def fetch_macd_signal(verified_ticker: str) -> str:
-
-    log.info("fetch_macd_signal('%s')", verified_ticker)
     try:
-        hist = _yf_hist(verified_ticker, "9mo")
+        hist = yf_hist(verified_ticker, "9mo")
         if hist.empty or len(hist) < 40:
             return f"Not enough data for MACD on {verified_ticker}"
         closes      = hist["Close"]
@@ -636,8 +456,6 @@ def fetch_macd_signal(verified_ticker: str) -> str:
 
 @function_tool
 def fetch_earnings_calendar(verified_ticker: str) -> str:
-
-    log.info("fetch_earnings_calendar('%s')", verified_ticker)
     try:
         stock = yf.Ticker(verified_ticker)
         parts = [f"Ticker: {verified_ticker}"]
@@ -667,15 +485,13 @@ def fetch_earnings_calendar(verified_ticker: str) -> str:
 
 @function_tool
 def fetch_top_gainers_losers() -> str:
-
-    log.info("fetch_top_gainers_losers()")
     ALWAYS_EXCLUDE = ["GME", "AMC", "BBBY", "SPCE", "MULN", "RIVN", "LCID", "NKLA"]
     try:
         watchlist = [t for lst in SP500_BY_SECTOR.values() for t in lst]
         movers    = []
         for ticker in watchlist[:30]:
             try:
-                hist = _yf_hist(ticker, "2d")
+                hist = yf_hist(ticker, "2d")
                 if hist.empty or len(hist) < 2:
                     continue
                 pct = ((float(hist["Close"].iloc[-1]) - float(hist["Close"].iloc[-2]))
@@ -694,10 +510,9 @@ def fetch_top_gainers_losers() -> str:
 
 @function_tool
 def debug_yfinance(ticker: str) -> str:
-
     try:
-        info  = _yf_info(ticker)
-        hist  = _yf_hist(ticker, "5d")
+        info  = yf_info(ticker)
+        hist  = yf_hist(ticker, "5d")
         price = round(float(hist["Close"].iloc[-1]), 2) if not hist.empty else "NO HISTORY"
         return (
             f"DEBUG {ticker}: symbol={info.get('symbol','MISSING')} | "
@@ -720,7 +535,6 @@ def open_report_in_browser(html_body: str) -> Dict[str, str]:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(html_body)
-            log.info("Report saved → %s", path)
         except Exception as e:
             log.warning("Could not save to %s: %s", path, e)
     try:
@@ -730,33 +544,6 @@ def open_report_in_browser(html_body: str) -> Dict[str, str]:
     return {"status": "ok", "path": tmp_path, "backup": cwd_path}
 
 
-
-SECTOR_RULES = (
-    "\n\n── DATA RULES (non-negotiable) ──"
-    "\n1. Call resolve_ticker(name) before ANY other tool for every company."
-    "\n2. Use ONLY the ticker resolve_ticker returns. Never guess."
-    "\n3. If resolve_ticker returns INVALID → skip that company, try another."
-    "\n4. FALLBACK: If fewer than 3 tickers verified from news:"
-    "\n   Call fetch_sp500_sector_tickers(your_sector) and resolve_ticker on each."
-    "\n   Keep going until you have AT LEAST 4 verified tickers."
-    "\n   This is mandatory — you MUST always deliver at least 3 candidates."
-    "\n5. Prices MUST come from fetch_stock_quote. Never invent numbers."
-    "\n6. Names MUST come from resolve_ticker. Never invent names."
-
-    "\n\n── SELECTION CRITERIA ──"
-    "\nAVOID: RSI > 65 (overbought)"
-    "\nAVOID: FALLING SMA or price below 50-day SMA"
-    "\nAVOID: BEARISH MACD"
-    "\nAVOID: Any ticker on the exclusion list"
-    "\nTARGET: RSI 30-55 | RISING SMA | Price ABOVE SMA | BULLISH MACD | Analyst target ≥5% upside"
-    "\nIf no stock meets all criteria, pick the best available — ALWAYS return at least 3."
-
-    "\n\n── OUTPUT FORMAT ──"
-    "\nFor each candidate return:"
-    "\n  ticker | name | price | RSI | SMA verdict | MACD | analyst target | upside%"
-    "\n  | EPS | news catalyst | thesis | risk | conviction 1-10"
-)
-
 ALL_TOOLS = [
     resolve_ticker, fetch_market_news, fetch_stock_quote, fetch_stock_overview,
     fetch_rsi_signal, fetch_sma_trend, fetch_macd_signal, fetch_earnings_calendar,
@@ -764,8 +551,99 @@ ALL_TOOLS = [
 ]
 
 
+# ── AGENTS ────────────────────────────────────────────────────────────────────
 
-def _make_analyst(name: str, sector_label: str, news_query: str, fallback_sector: str) -> Agent:
+input_guardrail_agent = Agent(
+    name="InputGuardrailAgent",
+    instructions=(
+        "You validate user requests for a stock research tool. "
+        "Approve (is_valid=True) anything related to: stocks, investing, markets, "
+        "financial research, trading, portfolio analysis, earnings, or macro economy. "
+        "Reject (is_valid=False) ONLY if the request has nothing to do with finance "
+        "(e.g. recipes, essays) OR explicitly asks for something illegal like insider trading. "
+        "When in doubt — approve."
+    ),
+    output_type=InputValidation,
+    model="gpt-4o-mini",
+)
+
+output_guardrail_agent = Agent(
+    name="OutputGuardrailAgent",
+    instructions=(
+        "You review an HTML stock research report. "
+        "Return is_valid=False ONLY if the report is completely empty "
+        "or contains nothing but unfilled placeholder text like '[Insert X here]'. "
+        "Return is_valid=True if the report contains ANY real ticker symbol "
+        "(AAPL, MSFT, NVDA, XOM, etc.) — even if some data is missing or partial. "
+        "Your only job is to catch a completely broken/unrendered template."
+    ),
+    output_type=OutputValidation,
+    model="gpt-4o-mini",
+)
+
+
+@input_guardrail
+async def stock_research_input_guardrail(
+    ctx: RunContextWrapper, agent: Agent, input: str
+) -> GuardrailFunctionOutput:
+    result     = await Runner.run(input_guardrail_agent, input, context=ctx.context)
+    validation = result.final_output
+    return GuardrailFunctionOutput(
+        output_info=validation,
+        tripwire_triggered=not validation.is_valid,
+    )
+
+
+@output_guardrail
+async def stock_report_output_guardrail(
+    ctx: RunContextWrapper, agent: Agent, output: str
+) -> GuardrailFunctionOutput:
+    mid     = len(output) // 2
+    preview = output[:1500] + "\n...\n" + output[mid:mid + 1000] + "\n...\n" + output[-500:]
+    result     = await Runner.run(output_guardrail_agent, preview, context=ctx.context)
+    validation = result.final_output
+    return GuardrailFunctionOutput(
+        output_info=validation,
+        tripwire_triggered=not validation.is_valid,
+    )
+
+
+judge_agent = Agent(
+    name="ReportJudge",
+    instructions=(
+        "You are a quality judge for AI-generated stock research reports. "
+        "You will receive a finished HTML stock report. "
+
+        "Check these four things and fill in the structured fields: "
+
+        "1. has_min_picks: Does the report contain at least 3 real stock picks "
+        "   with actual ticker symbols (AAPL, MSFT, etc.)? Set True if yes. "
+
+        "2. prices_present: Does every pick have a real dollar price like $213.49? "
+        "   Set False if any pick is missing a price or shows 'N/A' for price. "
+
+        "3. no_placeholders: Is the report free of '[Insert X]' style text? "
+        "   Set True if there are no unfilled placeholders. "
+
+        "4. score: Rate overall quality 1-10. "
+        "   10 = perfect professional report. "
+        "   7  = acceptable — picks present, prices real, theses make sense. "
+        "   4  = poor — missing picks, missing prices, or all generic vague text. "
+        "   1  = completely useless or empty. "
+
+        "Set approved=True ONLY when ALL of these are true: "
+        "score >= 7 AND has_min_picks=True AND prices_present=True AND no_placeholders=True. "
+
+        "In critique: list the SPECIFIC problems found. Be direct and brief. "
+        "Example: 'Pick 3 (XOM) is missing a price. Pick 5 thesis is generic filler.' "
+        "If approved, set critique to empty string."
+    ),
+    output_type=JudgeVerdict,
+    model="gpt-4o-mini",
+)
+
+
+def make_analyst(name: str, sector_label: str, news_query: str, fallback_sector: str) -> Agent:
     return Agent(
         name=name,
         instructions=(
@@ -790,28 +668,26 @@ def _make_analyst(name: str, sector_label: str, news_query: str, fallback_sector
     )
 
 
-tech_sector_analyst = _make_analyst(
+tech_sector_analyst = make_analyst(
     name="TechSectorAnalyst",
     sector_label="Technology (AI, semiconductors, cloud, software)",
     news_query="technology AI semiconductor software cloud earnings",
     fallback_sector="technology",
 )
 
-energy_sector_analyst = _make_analyst(
+energy_sector_analyst = make_analyst(
     name="EnergySectorAnalyst",
     sector_label="Energy (oil, gas, renewables, utilities)",
     news_query="energy oil gas renewable utility earnings guidance",
     fallback_sector="energy",
 )
 
-healthcare_sector_analyst = _make_analyst(
+healthcare_sector_analyst = make_analyst(
     name="HealthcareSectorAnalyst",
     sector_label="Healthcare (biotech, pharma, medical devices)",
     news_query="healthcare biotech pharma FDA approval clinical trial earnings",
     fallback_sector="healthcare",
 )
-
-
 
 macro_news_analyst = Agent(
     name="MacroNewsAnalyst",
@@ -828,8 +704,6 @@ macro_news_analyst = Agent(
     model="gpt-4o-mini",
     model_settings=ModelSettings(temperature=0),
 )
-
-
 
 top5_stock_picker = Agent(
     name="Top5StockPicker",
@@ -867,18 +741,32 @@ top5_stock_picker = Agent(
         "\n 10. Entry strategy: buy at open / limit at $X / wait for dip to $Y"
         "\n 11. Conviction: HIGH (6-7/7) or MEDIUM (4-5/7)"
 
-        f"\n\nFORMAT: Output a complete self-contained HTML page with embedded CSS. "
-        f"Today's date is {TODAY} — put it in the header, never write a placeholder. "
-        f"Include a macro context section at the top. "
-        f"Include a legal disclaimer at the bottom. "
-        f"Never write '[Insert X]' anywhere — every field must have real data or 'N/A'."
+        f"\n\nFORMAT: Output a complete self-contained HTML page. Today's date is {TODAY}."
+        f"\n\nDESIGN SPEC — follow exactly:"
+        f"\n• Color scheme: background #0f1117, cards #1a1d27, accent #3b82f6, text #e2e8f0, muted #94a3b8"
+        f"\n• Font: system-ui, sans-serif. Base font-size 15px, line-height 1.6."
+        f"\n• Header: full-width dark bar with title 'Stock Research Report' in white, date in accent blue, subtitle 'AI-Generated · Not Financial Advice'"
+        f"\n• Macro section: a single card below the header with a subtle left border in accent blue."
+        f"\n• Each stock pick: a card with rounded corners (border-radius 12px), subtle box-shadow, and a top colored bar:"
+        f"\n    - HIGH conviction → top bar green (#22c55e)"
+        f"\n    - MEDIUM conviction → top bar yellow (#f59e0b)"
+        f"\n• Inside each pick card layout:"
+        f"\n    Row 1: Ticker in large bold (24px accent blue) + company name + price in large white + score badge (e.g. '6/7') + Conviction label (HIGH or MEDIUM) in matching color"
+        f"\n    Row 2: Three inline signal badges — RSI badge, SMA badge, MACD badge."
+        f"\n        Badge colors: BULLISH/HEALTHY/OVERSOLD → green bg. ELEVATED/NEUTRAL → yellow bg. BEARISH/OVERBOUGHT/WEAK → red bg."
+        f"\n    Row 3: Two columns — left: Analyst target + upside % + EPS. Right: Entry strategy (e.g. 'Buy at open' or 'Limit at $X')."
+        f"\n    Row 4: Business summary — 1-2 sentence description of what the company does."
+        f"\n    Row 5: News catalyst — 📰 icon + specific headline in italic + date."
+        f"\n    Row 6: Investment thesis paragraph — why this stock, why NOW."
+        f"\n    Row 7: Key risk in a red-tinted box."
+        f"\n• Footer: dark bar with legal disclaimer in small muted text."
+        f"\n• Never write '[Insert X]' — every field must have real data or 'N/A'."
+        f"\n• No external fonts, no CDN links — fully self-contained."
     ),
     model="o3-mini",
     model_settings=ModelSettings(temperature=1),
     output_guardrails=[stock_report_output_guardrail],
 )
-
-
 
 report_opener = Agent(
     name="ReportOpener",
@@ -892,17 +780,141 @@ report_opener = Agent(
     model_settings=ModelSettings(temperature=0),
 )
 
-
-
 orchestrator = Agent(
     name="Orchestrator",
     instructions="You are the entry point for a stock research pipeline. Confirm the request is valid.",
     model="gpt-4o-mini",
-    input_guardrails=[stock_research_input_guardrail],
+    input_guardrails=[stock_research_input_guardrail]
 )
 
 
+# ── PIPELINE HELPERS ──────────────────────────────────────────────────────────
+
+async def run_with_429_retry(agent, prompt: str, max_turns: int, label: str,
+                               max_retries: int = 4) -> str:
+    delay = 15.0
+    for attempt in range(max_retries + 1):
+        try:
+            result = await Runner.run(agent, prompt, max_turns=max_turns)
+            return result.final_output
+        except Exception as exc:
+            err_str = str(exc)
+            is_429  = "429" in err_str or "rate limit" in err_str.lower()
+            if is_429 and attempt < max_retries:
+                wait = delay + random.uniform(0, delay * 0.3)
+                await asyncio.sleep(wait)
+                delay *= 2
+            else:
+                raise
+
+
+async def run_with_judge(combined_research: str, max_retries: int = 2) -> tuple[Any, int] | str | tuple[str, int]:
+    best_report: str = ""
+    best_score:  int = 0
+    critique:    str = ""
+
+    for attempt in range(max_retries + 1):
+        label = f"attempt {attempt + 1}/{max_retries + 1}"
+        monitor.start(f"picker_{label}")
+
+        picker_prompt = combined_research
+        if critique:
+            picker_prompt += (
+                f"\n\n⚠️  JUDGE FEEDBACK — FIX THESE IN THIS ATTEMPT:\n{critique}\n"
+                f"REMINDER: The report MUST contain AT LEAST 3 complete stock picks, "
+                f"each with a real dollar price."
+            )
+
+        try:
+            result      = await Runner.run(top5_stock_picker, picker_prompt, max_turns=25)
+            html_report = result.final_output
+            monitor.ok(f"picker_{label}", "HTML generated")
+        except OutputGuardrailTripwireTriggered as e:
+            monitor.err(f"picker_{label}", f"OutputGuardrail fired: {e}")
+            critique = (
+                (critique + "\n" if critique else "") +
+                "CRITICAL: Your previous response was rejected as empty or unrendered. "
+                "You MUST output a complete HTML page starting with <!DOCTYPE html> "
+                "containing at least 3 real stock picks with real dollar prices. "
+                "Do NOT output plain text. Do NOT output an explanation. Output ONLY the HTML."
+            )
+            continue
+        except Exception as e:
+            monitor.err(f"picker_{label}", str(e))
+            log.error("Picker failed on %s: %s", label, e)
+            continue
+
+        monitor.start(f"judge_{label}")
+        try:
+            judge_result = await Runner.run(judge_agent, html_report, max_turns=5)
+            verdict: JudgeVerdict = judge_result.final_output
+            monitor.ok(f"judge_{label}", f"score={verdict.score}")
+        except Exception as e:
+            monitor.err(f"judge_{label}", str(e))
+            return html_report, best_score
+
+        monitor.judge_scored(verdict.score)
+
+        if verdict.score > best_score:
+            best_score  = verdict.score
+            best_report = html_report
+
+        if verdict.approved:
+            return best_report, best_score
+
+        critique = verdict.critique
+
+    log.warning(
+        "Max retries reached. Using best report (score=%d/10). "
+        "Report will still have picks even if imperfect.",
+        best_score
+    )
+    return best_report, best_score
+
+
+# ── MAIN PIPELINE ─────────────────────────────────────────────────────────────
+MEMORY_FILE = "pipeline_memory.json"
+
+def load_memory() -> str:
+    try:
+        with open(MEMORY_FILE) as f:
+            records = json.load(f)
+        if not records:
+            return ""
+        lines = ["PREVIOUS RUN CONTEXT (last 3 sessions):"]
+        for r in records[-3:]:
+            lines.append(f"  [{r['date']}] Picks: {r['picks']} | Judge score: {r['score']}/10")
+        return "\n".join(lines)
+    except FileNotFoundError:
+        return ""
+
+def save_memory(picks_summary: str, score: int) -> None:
+    try:
+        try:
+            with open(MEMORY_FILE) as f:
+                records = json.load(f)
+        except FileNotFoundError:
+            records = []
+        records.append({
+            "date": TODAY,
+            "picks": picks_summary[:300],
+            "score": score
+        })
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(records[-10:], f, indent=2)  # keep last 10 runs
+    except Exception as e:
+        log.warning("Could not save memory: %s", e)
+
+        
 async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None:
+    global monitor
+    monitor = PipelineMonitor()
+    if not NEWS_API_KEY:
+        log.warning(
+            "NEWS_API_KEY not set — sector agents will fall back to "
+            "S&P500 hardcoded tickers instead of live news. "
+            "Set NEWS_API_KEY in .env for full pipeline quality."
+        )
     if user_prompt is None:
         user_prompt = (
             "Run a full stock research analysis for tomorrow's trading session. "
@@ -911,13 +923,8 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
             "You MUST include at least 3 complete stock picks with real prices in the report."
         )
 
-    log.info("═══ PIPELINE START — %s ═══", TODAY)
-
+    print(f"\n StockResearch pipeline starting — {TODAY}\n")
     monitor.start("startup")
-    if not NEWS_API_KEY:
-        log.warning("NEWS_API_KEY not set — will use S&P500 fallback for all sectors")
-    if datetime.now().weekday() >= 5:
-        log.warning("Weekend run — prices will be from last trading day (Friday)")
     monitor.ok("startup")
 
     monitor.start("input_guardrail")
@@ -930,7 +937,6 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
         monitor.summary()
         return
 
-
     research_prompt = (
         "Follow your planning steps exactly. "
         "Resolve every ticker before using it. "
@@ -938,14 +944,13 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
         "Return AT LEAST 3 candidates no matter what — use the S&P500 fallback if needed."
     )
 
-    async def _staggered_sector(agent, prompt: str, max_turns: int,
+    async def staggered_sector(agent, prompt: str, max_turns: int,
                                  label: str, delay_s: int) -> str:
         if delay_s > 0:
-            log.info("Staggering %s by %ds to spread TPM load", label, delay_s)
             await asyncio.sleep(delay_s)
         monitor.start(label)
         try:
-            output = await _run_with_429_retry(agent, prompt, max_turns, label)
+            output = await run_with_429_retry(agent, prompt, max_turns, label)
             monitor.ok(label, f"{len(output)} chars")
             return output
         except Exception as exc:
@@ -955,33 +960,28 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
     monitor.start("parallel_research")
     with trace("Parallel Sector Research"):
         results = await asyncio.gather(
-            _staggered_sector(tech_sector_analyst,       research_prompt, 50, "tech_sector",       SECTOR_LAUNCH_DELAYS[0]),
-            _staggered_sector(energy_sector_analyst,     research_prompt, 50, "energy_sector",     SECTOR_LAUNCH_DELAYS[1]),
-            _staggered_sector(healthcare_sector_analyst, research_prompt, 50, "healthcare_sector", SECTOR_LAUNCH_DELAYS[2]),
-            _run_with_429_retry(macro_news_analyst, "Provide the macro backdrop for tomorrow.", 15, "macro"),
+            staggered_sector(tech_sector_analyst,       research_prompt, 50, "tech_sector",       SECTOR_LAUNCH_DELAYS[0]),
+            staggered_sector(energy_sector_analyst,     research_prompt, 50, "energy_sector",     SECTOR_LAUNCH_DELAYS[1]),
+            staggered_sector(healthcare_sector_analyst, research_prompt, 50, "healthcare_sector", SECTOR_LAUNCH_DELAYS[2]),
+            run_with_429_retry(macro_news_analyst, "Provide the macro backdrop for tomorrow.", 15, "macro"),
             return_exceptions=True,
         )
     monitor.ok("parallel_research")
 
-    def _safe(result, label: str) -> str:
+    def safe(result, label: str) -> str:
         if isinstance(result, Exception):
             return f"[{label} unavailable — {result}]"
         return result
 
-    tech_out       = _safe(results[0], "tech_sector")
-    energy_out     = _safe(results[1], "energy_sector")
-    healthcare_out = _safe(results[2], "healthcare_sector")
-    macro_out      = _safe(results[3], "macro")
+    tech_out       = safe(results[0], "tech_sector")
+    energy_out     = safe(results[1], "energy_sector")
+    healthcare_out = safe(results[2], "healthcare_sector")
+    macro_out      = safe(results[3], "macro")
 
-
-    def _sector_failed(output: str) -> bool:
+    def sector_failed(output: str) -> bool:
         return output.strip().startswith("[") and "unavailable" in output
 
-    if all(_sector_failed(o) for o in [tech_out, energy_out, healthcare_out]):
-        log.warning(
-            "All 3 sector agents failed (sustained rate-limit). "
-            "Building direct yfinance fallback package for the Picker."
-        )
+    if all(sector_failed(o) for o in [tech_out, energy_out, healthcare_out]):
         monitor.start("sector_fallback")
         fallback_tickers = (
             SP500_BY_SECTOR["technology"][:4]
@@ -994,11 +994,11 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
         ]
         for tkr in fallback_tickers:
             try:
-                hist = _yf_hist(tkr, "2d")
+                hist = yf_hist(tkr, "2d")
                 if hist.empty:
                     continue
                 price  = round(float(hist["Close"].iloc[-1]), 2)
-                info   = _yf_info(tkr)
+                info   = yf_info(tkr)
                 name   = info.get("shortName", tkr)
                 target = info.get("targetMeanPrice")
                 upside = (
@@ -1009,7 +1009,6 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
                     f"  {tkr} | {name} | Price: ${price} | "
                     f"Analyst Target: ${target} | Upside: {upside}"
                 )
-                log.info("Fallback: %s = $%s", tkr, price)
             except Exception as exc:
                 log.warning("Fallback data failed for %s: %s", tkr, exc)
 
@@ -1040,15 +1039,19 @@ Select the top 5 (minimum 3 if fewer available).
 HTML report must have real prices on every pick — no placeholders.
 """
 
-
     monitor.start("picker_and_judge")
     html_report: Optional[str] = None
-
+    memory_context = load_memory()
+    if memory_context:
+        combined = memory_context + "\n\n" + combined
     try:
-        html_report = await run_with_judge(combined, max_retries=2)
+        html_report, best_score = await run_with_judge(combined, max_retries=2)
         monitor.ok("picker_and_judge", "Report generated and judge-approved")
+        known_tickers = {t for lst in SP500_BY_SECTOR.values() for t in lst}
+        found = dict.fromkeys(re.findall(r'\b([A-Z]{2,5})\b', html_report))
+        picks_summary = ", ".join(t for t in found if t in known_tickers)[:300]
+        save_memory(picks_summary or "unknown", int(best_score))
     except OutputGuardrailTripwireTriggered:
-
         monitor.err("picker_and_judge", "Output guardrail fired on all 3 attempts")
         print("\n❌ All Picker attempts produced an empty report.")
         print("💡 This usually means the API is still heavily rate-limited.")
