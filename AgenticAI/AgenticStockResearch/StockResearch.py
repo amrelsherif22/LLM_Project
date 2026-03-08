@@ -34,7 +34,6 @@ from agents.exceptions import (
 )
 
 
-# ── CONFIG & CONSTANTS ────────────────────────────────────────────────────────
 
 load_dotenv(override=True)
 
@@ -89,7 +88,6 @@ SECTOR_RULES = (
 )
 
 
-# ── MONITORING ────────────────────────────────────────────────────────────────
 
 @dataclass
 class StepRecord:
@@ -156,7 +154,6 @@ class PipelineMonitor:
 monitor = PipelineMonitor()
 
 
-# ── YFINANCE HELPERS ──────────────────────────────────────────────────────────
 
 LAST_YF_CALL: float = 0.0
 YF_MIN_GAP:   float = 0.35
@@ -197,7 +194,6 @@ def yf_hist(ticker: str, period: str, retries: int = 3):
     return pd.DataFrame()
 
 
-# ── SCHEMAS ───────────────────────────────────────────────────────────────────
 
 class RsiResult(BaseModel):
     ticker:    str
@@ -225,7 +221,6 @@ class JudgeVerdict(BaseModel):
     critique:        str    # Specific issues to fix — fed back to the Picker on retry
 
 
-# ── TOOLS ─────────────────────────────────────────────────────────────────────
 
 @function_tool
 def resolve_ticker(company_name_or_ticker: str) -> str:
@@ -551,7 +546,6 @@ ALL_TOOLS = [
 ]
 
 
-# ── AGENTS ────────────────────────────────────────────────────────────────────
 
 input_guardrail_agent = Agent(
     name="InputGuardrailAgent",
@@ -788,7 +782,6 @@ orchestrator = Agent(
 )
 
 
-# ── PIPELINE HELPERS ──────────────────────────────────────────────────────────
 
 async def run_with_429_retry(agent, prompt: str, max_turns: int, label: str,
                                max_retries: int = 4) -> str:
@@ -872,7 +865,6 @@ async def run_with_judge(combined_research: str, max_retries: int = 2) -> tuple[
     return best_report, best_score
 
 
-# ── MAIN PIPELINE ─────────────────────────────────────────────────────────────
 MEMORY_FILE = "pipeline_memory.json"
 
 def load_memory() -> str:
