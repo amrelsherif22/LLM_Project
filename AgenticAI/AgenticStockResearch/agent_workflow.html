@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Sector Agent Internal Workflow</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --bg:       #0e0f15;
+  --panel:    #14161f;
+  --border:   #252836;
+  --border-hi:#3a3f54;
+  --text:     #d2d6ea;
+  --dim:      #5c6180;
+  --faint:    #2a2d3e;
+  --grid:     #161820;
+
+  --blue:   #5b8af5;
+  --teal:   #3ecfbf;
+  --green:  #50d17a;
+  --orange: #f5a623;
+  --red:    #e05555;
+  --purple: #b47cf8;
+  --yellow: #f5c842;
+}
+
+* { box-sizing:border-box; margin:0; padding:0; }
+
+body {
+  background: var(--bg);
+  font-family: 'IBM Plex Sans', sans-serif;
+  color: var(--text);
+  min-height: 100vh;
+  padding-bottom: 60px;
+}
+
+body::before {
+  content:'';
+  position:fixed; inset:0; z-index:0; pointer-events:none;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* ── header ── */
+header {
+  position:relative; z-index:10;
+  padding: 20px 36px 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg,#12141c 0%,transparent 100%);
+  display:flex; align-items:center; gap:14px;
+}
+.hdr-icon {
+  width:36px; height:36px; border-radius:9px;
+  background: rgba(91,138,245,.15);
+  border: 1px solid rgba(91,138,245,.35);
+  display:flex; align-items:center; justify-content:center;
+  font-size:18px;
+}
+header h1 { font-size:15px; font-weight:600; }
+header p  { font-size:11px; color:var(--dim); font-family:'IBM Plex Mono',monospace; margin-top:2px; }
+.hdr-badge {
+  margin-left:auto;
+  font-size:10.5px; font-family:'IBM Plex Mono',monospace;
+  background:#1a1c28; border:1px solid var(--border); border-radius:5px;
+  padding:4px 10px; color:var(--dim);
+}
+
+/* ── canvas ── */
+.canvas {
+  position:relative; z-index:1;
+  display:flex;
+  justify-content:center;
+  padding: 44px 40px 60px;
+}
+
+/* ── flow column ── */
+.flow {
+  position:relative;
+  width: 340px;
+  display:flex; flex-direction:column; align-items:center;
+  gap:0;
+}
+
+/* ── connector arrow ── */
+.arrow {
+  width:2px; background:var(--border-hi);
+  position:relative; flex-shrink:0;
+}
+.arrow.h { height:28px; }
+.arrow.h-sm { height:18px; }
+.arrow.h-lg { height:40px; }
+.arrow::after {
+  content:'';
+  position:absolute; bottom:-6px; left:50%; transform:translateX(-50%);
+  border-left:5px solid transparent;
+  border-right:5px solid transparent;
+  border-top:7px solid var(--border-hi);
+}
+.arrow.blue::after   { border-top-color:var(--blue); }
+.arrow.teal::after   { border-top-color:var(--teal); }
+.arrow.green::after  { border-top-color:var(--green); }
+.arrow.orange::after { border-top-color:var(--orange); }
+.arrow.blue  { background:var(--blue); }
+.arrow.teal  { background:var(--teal); }
+.arrow.green { background:var(--green); }
+.arrow.orange{ background:var(--orange); }
+
+.arrow-label {
+  position:absolute; right:12px; top:50%;
+  transform:translateY(-50%);
+  font-size:9.5px; font-family:'IBM Plex Mono',monospace;
+  color:var(--dim);
+  background:var(--bg); padding:1px 6px; border-radius:3px;
+  white-space:nowrap;
+}
+
+/* ── node base ── */
+.node {
+  width:100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius:10px;
+  overflow:hidden;
+  position:relative;
+  transition: border-color .18s, box-shadow .18s;
+}
+.node:hover {
+  border-color: var(--border-hi);
+  box-shadow: 0 0 0 1px var(--border-hi), 0 6px 28px rgba(0,0,0,.5);
+}
+/* left accent bar */
+.node::before {
+  content:''; position:absolute; left:0; top:0; bottom:0; width:3px;
+  border-radius:10px 0 0 10px;
+}
+.node.c-blue::before   { background:var(--blue); }
+.node.c-teal::before   { background:var(--teal); }
+.node.c-green::before  { background:var(--green); }
+.node.c-orange::before { background:var(--orange); }
+.node.c-red::before    { background:var(--red); }
+.node.c-purple::before { background:var(--purple); }
+.node.c-yellow::before { background:var(--yellow); }
+
+.node-head {
+  display:flex; align-items:center; gap:10px;
+  padding: 10px 13px 9px;
+  border-bottom: 1px solid var(--border);
+}
+.n-icon {
+  width:28px; height:28px; border-radius:7px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:14px; flex-shrink:0;
+}
+.n-title { font-size:12.5px; font-weight:600; color:var(--text); line-height:1.2; }
+.n-sub   { font-size:10px; color:var(--dim); font-family:'IBM Plex Mono',monospace; margin-top:2px; }
+
+.node-body { padding:9px 13px 10px; }
+.row {
+  display:flex; justify-content:space-between; align-items:center;
+  margin-bottom:5px;
+  font-size:11px;
+}
+.row:last-child { margin-bottom:0; }
+.rk { color:var(--dim); font-family:'IBM Plex Mono',monospace; font-size:10.5px; }
+.rv { color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:10.5px;
+      max-width:175px; text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.pill {
+  display:inline-block; border-radius:4px; padding:2px 7px;
+  font-size:9.5px; font-family:'IBM Plex Mono',monospace; font-weight:600;
+}
+.p-blue   { background:rgba(91,138,245,.14);  color:var(--blue); }
+.p-teal   { background:rgba(62,207,191,.14);  color:var(--teal); }
+.p-green  { background:rgba(80,209,122,.14);  color:var(--green); }
+.p-orange { background:rgba(245,166,35,.14);  color:var(--orange); }
+.p-red    { background:rgba(224,85,85,.14);   color:var(--red); }
+.p-purple { background:rgba(180,124,248,.14); color:var(--purple); }
+.p-yellow { background:rgba(245,200,66,.14);  color:var(--yellow); }
+
+/* ── step number badge ── */
+.step-num {
+  position:absolute; top:10px; right:11px;
+  width:20px; height:20px; border-radius:50%;
+  background:var(--faint); border:1px solid var(--border-hi);
+  font-size:9px; font-family:'IBM Plex Mono',monospace; color:var(--dim);
+  display:flex; align-items:center; justify-content:center;
+  font-weight:600;
+}
+
+/* ── branch / decision diamond ── */
+.diamond-wrap {
+  width:100%;
+  display:flex; flex-direction:column; align-items:center;
+  position:relative;
+}
+.diamond {
+  width:140px; height:54px;
+  background:var(--panel);
+  border:1.5px solid var(--orange);
+  transform:rotate(0deg);
+  border-radius:6px;
+  display:flex; align-items:center; justify-content:center;
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  background: linear-gradient(135deg,rgba(245,166,35,.12),rgba(245,166,35,.04));
+}
+.diamond-inner {
+  transform:rotate(0deg);
+  font-size:11px; font-weight:600; color:var(--orange);
+  font-family:'IBM Plex Mono',monospace; text-align:center;
+  line-height:1.2;
+}
+
+/* ── branch row (split after diamond) ── */
+.branch-row {
+  width:100%;
+  display:flex; gap:20px;
+  justify-content:center;
+  margin-top:0;
+}
+.branch-col {
+  flex:1; max-width:155px;
+  display:flex; flex-direction:column; align-items:center;
+  gap:0;
+}
+.branch-label {
+  font-size:10px; font-family:'IBM Plex Mono',monospace;
+  padding:3px 10px; border-radius:4px; margin-bottom:6px;
+  white-space:nowrap;
+}
+.bl-green  { background:rgba(80,209,122,.1);  color:var(--green);  border:1px solid rgba(80,209,122,.25); }
+.bl-orange { background:rgba(245,166,35,.1);  color:var(--orange); border:1px solid rgba(245,166,35,.25); }
+
+/* branch horizontal bars */
+.branch-h-bar {
+  width:100%; height:1.5px; background:var(--border-hi);
+  position:relative;
+}
+
+/* ── analysis pipeline block ── */
+.pipeline-block {
+  width:100%;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:12px;
+  overflow:hidden;
+}
+.pipeline-title {
+  font-size:10px; font-family:'IBM Plex Mono',monospace;
+  color:var(--teal); letter-spacing:.1em; text-transform:uppercase;
+  padding:9px 14px 7px;
+  border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:7px;
+}
+.pipeline-step {
+  display:flex; align-items:center; gap:11px;
+  padding:9px 14px;
+  border-bottom:1px solid var(--faint);
+  position:relative;
+}
+.pipeline-step:last-child { border-bottom:none; }
+.ps-num {
+  width:22px; height:22px; border-radius:6px; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:10px; font-weight:600; font-family:'IBM Plex Mono',monospace;
+}
+.ps-name { font-size:12px; font-weight:600; color:var(--text); }
+.ps-desc { font-size:10px; color:var(--dim); margin-top:1px; font-family:'IBM Plex Mono',monospace; }
+.ps-badge {
+  margin-left:auto;
+  font-size:9px; font-family:'IBM Plex Mono',monospace;
+  padding:2px 7px; border-radius:4px;
+  white-space:nowrap; flex-shrink:0;
+}
+
+/* ── merge node ── */
+.merge {
+  width:100%; text-align:center;
+  padding:7px 13px;
+  border-radius:8px; font-size:11px;
+  font-family:'IBM Plex Mono',monospace; font-weight:600;
+}
+
+/* ── side note ── */
+.side-note {
+  position:absolute;
+  right:-230px; top:50%; transform:translateY(-50%);
+  width:200px; padding:8px 11px;
+  background:var(--panel); border:1px solid var(--faint);
+  border-radius:8px; font-size:10px; color:var(--dim);
+  font-family:'IBM Plex Mono',monospace; line-height:1.5;
+}
+.side-note::before {
+  content:'';
+  position:absolute; left:-10px; top:50%; transform:translateY(-50%);
+  border-top:6px solid transparent;
+  border-bottom:6px solid transparent;
+  border-right:10px solid var(--faint);
+}
+
+/* ── connector SVG for branch merge ── */
+.branch-svg { overflow:visible; display:block; }
+
+/* animations */
+.node, .diamond-wrap, .pipeline-block {
+  opacity:0; transform:translateY(10px);
+  animation: fadeup .38s ease forwards;
+}
+@keyframes fadeup {
+  to { opacity:1; transform:translateY(0); }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hdr-icon">🤖</div>
+  <div>
+    <h1>Sector Agent Internal Workflow</h1>
+    <p>Tech · Energy · Healthcare — shared 6-step planning loop</p>
+  </div>
+  <div class="hdr-badge">applies to all 3 sector agents</div>
+</header>
+
+<div class="canvas">
+<div class="flow">
+
+  <!-- ══ STEP 1 ══ -->
+  <div class="node c-orange" style="animation-delay:.05s">
+    <span class="step-num">1</span>
+    <div class="node-head">
+      <div class="n-icon" style="background:rgba(245,166,35,.12)">📊</div>
+      <div>
+        <div class="n-title">fetch_top_gainers_losers</div>
+        <div class="n-sub">build exclusion list first</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="row">
+        <span class="rk">scans</span>
+        <span class="rv">top 30 SP500 tickers</span>
+      </div>
+      <div class="row">
+        <span class="rk">flags</span>
+        <span class="rv">movers ≥ 4% today</span>
+      </div>
+      <div class="row">
+        <span class="rk">always exclude</span>
+        <span class="rv">GME, AMC, NKLA…</span>
+      </div>
+      <div class="row"><span class="pill p-orange">tool</span></div>
+    </div>
+  </div>
+
+  <div class="arrow h orange" style="--delay:.1s">
+    <span class="arrow-label">exclusion list saved</span>
+  </div>
+
+  <!-- ══ STEP 2 ══ -->
+  <div class="node c-blue" style="animation-delay:.12s">
+    <span class="step-num">2</span>
+    <div class="node-head">
+      <div class="n-icon" style="background:rgba(91,138,245,.12)">📰</div>
+      <div>
+        <div class="n-title">fetch_market_news</div>
+        <div class="n-sub">sector-specific query · 48h window</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="row">
+        <span class="rk">tech query</span>
+        <span class="rv">"AI semiconductor cloud"</span>
+      </div>
+      <div class="row">
+        <span class="rk">energy query</span>
+        <span class="rv">"oil gas renewable utility"</span>
+      </div>
+      <div class="row">
+        <span class="rk">health query</span>
+        <span class="rv">"biotech pharma FDA"</span>
+      </div>
+      <div class="row">
+        <span class="rk">returns</span>
+        <span class="rv">up to 12 articles</span>
+      </div>
+      <div class="row"><span class="pill p-blue">tool · NewsAPI</span></div>
+    </div>
+  </div>
+
+  <div class="arrow h blue">
+    <span class="arrow-label">headlines returned</span>
+  </div>
+
+  <!-- ══ STEP 3 ══ -->
+  <div class="node c-yellow" style="animation-delay:.18s">
+    <span class="step-num">3</span>
+    <div class="node-head">
+      <div class="n-icon" style="background:rgba(245,200,66,.12)">🔍</div>
+      <div>
+        <div class="n-title">Extract 6–8 Company Names</div>
+        <div class="n-sub">LLM parses article headlines</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="row">
+        <span class="rk">source</span>
+        <span class="rv">news titles + descriptions</span>
+      </div>
+      <div class="row">
+        <span class="rk">output</span>
+        <span class="rv">company name list</span>
+      </div>
+      <div class="row"><span class="pill p-yellow">reasoning step</span></div>
+    </div>
+  </div>
+
+  <div class="arrow h">
+    <span class="arrow-label">name list</span>
+  </div>
+
+  <!-- ══ STEP 4 ══ -->
+  <div class="node c-teal" style="animation-delay:.24s">
+    <span class="step-num">4</span>
+    <div class="node-head">
+      <div class="n-icon" style="background:rgba(62,207,191,.12)">✅</div>
+      <div>
+        <div class="n-title">resolve_ticker (each name)</div>
+        <div class="n-sub">yfinance validation loop</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="row">
+        <span class="rk">calls</span>
+        <span class="rv">resolve_ticker(name)</span>
+      </div>
+      <div class="row">
+        <span class="rk">keeps</span>
+        <span class="rv">VERIFIED results only</span>
+      </div>
+      <div class="row">
+        <span class="rk">drops</span>
+        <span class="rv">INVALID responses</span>
+      </div>
+      <div class="row"><span class="pill p-teal">tool · yfinance</span></div>
+    </div>
+  </div>
+
+  <div class="arrow h-lg" style="position:relative;">
+    <span class="arrow-label" style="right:-180px;">verified count check</span>
+  </div>
+
+  <!-- ══ BRANCH: ≥3 vs <3 ══ -->
+  <div class="diamond-wrap" style="animation-delay:.30s">
+    <div style="
+      width:160px; height:56px;
+      background:linear-gradient(135deg,rgba(245,166,35,.14),rgba(245,166,35,.04));
+      border:1.5px solid var(--orange);
+      border-radius:8px;
+      display:flex; align-items:center; justify-content:center;
+      font-size:12px; font-weight:700; color:var(--orange);
+      font-family:'IBM Plex Mono',monospace;
+      clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%);
+    ">
+      <span style="transform:none">verified ?</span>
+    </div>
+  </div>
+
+  <!-- Branch row -->
+  <div class="branch-row" style="margin-top:0; animation-delay:.34s; opacity:0; animation:fadeup .38s .34s ease forwards;">
+
+    <!-- LEFT: ≥ 3 verified -->
+    <div class="branch-col">
+      <div style="height:20px; width:1.5px; background:var(--green); position:relative;">
+        <div style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid var(--green);"></div>
+      </div>
+      <div class="branch-label bl-green">≥ 3 verified</div>
+
+      <!-- Remove exclusion list node -->
+      <div class="node c-red" style="opacity:1;transform:none;animation:none;">
+        <div class="node-head">
+          <div class="n-icon" style="background:rgba(224,85,85,.12)">🚫</div>
+          <div>
+            <div class="n-title" style="font-size:11.5px;">Remove Exclusion List</div>
+            <div class="n-sub">filter movers out</div>
+          </div>
+        </div>
+        <div class="node-body">
+          <div class="row">
+            <span class="rk">removes</span>
+            <span class="rv">big movers today</span>
+          </div>
+          <div class="row"><span class="pill p-red">filter step</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: < 3 verified → S&P500 fallback -->
+    <div class="branch-col">
+      <div style="height:20px; width:1.5px; background:var(--orange); position:relative;">
+        <div style="position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid var(--orange);"></div>
+      </div>
+      <div class="branch-label bl-orange">&lt; 3 verified</div>
+
+      <!-- S&P 500 fallback -->
+      <div class="node c-orange" style="opacity:1;transform:none;animation:none;">
+        <div class="node-head">
+          <div class="n-icon" style="background:rgba(245,166,35,.12)">📋</div>
+          <div>
+            <div class="n-title" style="font-size:11.5px;">fetch_sp500_sector_tickers</div>
+            <div class="n-sub">guaranteed candidates</div>
+          </div>
+        </div>
+        <div class="node-body">
+          <div class="row">
+            <span class="rk">returns</span>
+            <span class="rv">10 sector tickers</span>
+          </div>
+          <div class="row">
+            <span class="rk">resolve each</span>
+            <span class="rv">until ≥ 4 verified</span>
+          </div>
+          <div class="row"><span class="pill p-orange">fallback tool</span></div>
+        </div>
+      </div>
+
+      <!-- arrow back left -->
+      <div style="display:flex; align-items:center; margin-top:6px; gap:4px;">
+        <div style="height:1.5px; flex:1; background:var(--orange);"></div>
+        <div style="font-size:9.5px; font-family:'IBM Plex Mono',monospace; color:var(--orange); white-space:nowrap;">≥ 4 → merge</div>
+        <div style="height:1.5px; width:18px; background:var(--orange);"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- merge indicator -->
+  <div style="animation-delay:.4s; opacity:0; animation:fadeup .38s .4s ease forwards; width:100%; margin-top:10px;">
+    <div style="
+      text-align:center; padding:6px 14px;
+      background:rgba(62,207,191,.07); border:1px solid rgba(62,207,191,.25);
+      border-radius:6px; font-size:10px; font-family:'IBM Plex Mono',monospace;
+      color:var(--teal); letter-spacing:.06em;
+    ">↓ both branches merge here · proceed with verified tickers</div>
+  </div>
+
+  <div class="arrow h teal" style="margin-top:0;">
+    <span class="arrow-label">verified ticker list</span>
+  </div>
+
+  <!-- ══ STEP 5 — remove exclusion list (after merge for right branch case) ══ -->
+
+  <!-- ══ ANALYSIS PIPELINE ══ -->
+  <div class="pipeline-block" style="animation-delay:.46s">
+    <div class="pipeline-title">
+      <span>⚙</span> Per-Ticker Analysis Pipeline — Step 6
+    </div>
+
+    <!-- Stock Quote -->
+    <div class="pipeline-step">
+      <div class="ps-num" style="background:rgba(91,138,245,.14); color:var(--blue);">6a</div>
+      <div>
+        <div class="ps-name">fetch_stock_quote</div>
+        <div class="ps-desc">price · change% · OHLCV · 5-day history</div>
+      </div>
+      <span class="ps-badge" style="background:rgba(91,138,245,.1); color:var(--blue);">yfinance</span>
+    </div>
+
+    <!-- connector dot -->
+    <div style="width:1.5px; height:12px; background:var(--faint); margin:0 auto;"></div>
+
+    <!-- Stock Overview -->
+    <div class="pipeline-step">
+      <div class="ps-num" style="background:rgba(62,207,191,.14); color:var(--teal);">6b</div>
+      <div>
+        <div class="ps-name">fetch_stock_overview</div>
+        <div class="ps-desc">P/E · EPS · market cap · analyst target · upside%</div>
+      </div>
+      <span class="ps-badge" style="background:rgba(62,207,191,.1); color:var(--teal);">yfinance</span>
+    </div>
+
+    <div style="width:1.5px; height:12px; background:var(--faint); margin:0 auto;"></div>
+
+    <!-- RSI -->
+    <div class="pipeline-step">
+      <div class="ps-num" style="background:rgba(245,200,66,.14); color:var(--yellow);">6c</div>
+      <div>
+        <div class="ps-name">fetch_rsi_signal</div>
+        <div class="ps-desc">14-day RSI · OVERSOLD / HEALTHY / OVERBOUGHT</div>
+      </div>
+      <span class="ps-badge" style="background:rgba(245,200,66,.1); color:var(--yellow);">90d hist</span>
+    </div>
+
+    <div style="width:1.5px; height:12px; background:var(--faint); margin:0 auto;"></div>
+
+    <!-- SMA -->
+    <div class="pipeline-step">
+      <div class="ps-num" style="background:rgba(80,209,122,.14); color:var(--green);">6d</div>
+      <div>
+        <div class="ps-name">fetch_sma_trend</div>
+        <div class="ps-desc">50-day SMA · RISING / FALLING · price vs SMA</div>
+      </div>
+      <span class="ps-badge" style="background:rgba(80,209,122,.1); color:var(--green);">150d hist</span>
+    </div>
+
+    <div style="width:1.5px; height:12px; background:var(--faint); margin:0 auto;"></div>
+
+    <!-- MACD -->
+    <div class="pipeline-step">
+      <div class="ps-num" style="background:rgba(180,124,248,.14); color:var(--purple);">6e</div>
+      <div>
+        <div class="ps-name">fetch_macd_signal</div>
+        <div class="ps-desc">12/26/9 EMA · BULLISH / BEARISH / NEUTRAL</div>
+      </div>
+      <span class="ps-badge" style="background:rgba(180,124,248,.1); color:var(--purple);">9mo hist</span>
+    </div>
+
+    <div style="width:1.5px; height:12px; background:var(--faint); margin:0 auto;"></div>
+
+    <!-- Earnings -->
+    <div class="pipeline-step">
+      <div class="ps-num" style="background:rgba(224,85,85,.14); color:var(--red);">6f</div>
+      <div>
+        <div class="ps-name">fetch_earnings_calendar</div>
+        <div class="ps-desc">next earnings date · EPS actual vs estimate</div>
+      </div>
+      <span class="ps-badge" style="background:rgba(224,85,85,.1); color:var(--red);">yfinance</span>
+    </div>
+  </div>
+
+  <div class="arrow h green">
+    <span class="arrow-label">candidate data ready</span>
+  </div>
+
+  <!-- ══ SELECTION RULES ══ -->
+  <div class="node c-green" style="animation-delay:.52s">
+    <span class="step-num">✓</span>
+    <div class="node-head">
+      <div class="n-icon" style="background:rgba(80,209,122,.12)">📐</div>
+      <div>
+        <div class="n-title">Selection Criteria Check</div>
+        <div class="n-sub">AVOID vs TARGET rules</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="row">
+        <span class="rk" style="color:var(--red);">✗ avoid</span>
+        <span class="rv">RSI &gt; 65 · FALLING SMA · BEARISH MACD</span>
+      </div>
+      <div class="row">
+        <span class="rk" style="color:var(--green);">✓ target</span>
+        <span class="rv">RSI 30–55 · RISING SMA · BULLISH MACD</span>
+      </div>
+      <div class="row">
+        <span class="rk" style="color:var(--green);">✓ target</span>
+        <span class="rv">analyst target ≥ 5% upside</span>
+      </div>
+      <div class="row">
+        <span class="rk">min output</span>
+        <span class="rv">≥ 3 candidates always</span>
+      </div>
+      <div class="row"><span class="pill p-green">selection logic</span></div>
+    </div>
+  </div>
+
+  <div class="arrow h green">
+    <span class="arrow-label">→ Research Aggregator</span>
+  </div>
+
+  <!-- ══ OUTPUT ══ -->
+  <div class="node c-blue" style="animation-delay:.58s">
+    <div class="node-head">
+      <div class="n-icon" style="background:rgba(91,138,245,.12)">📤</div>
+      <div>
+        <div class="n-title">Sector Output Package</div>
+        <div class="n-sub">passed to Research Aggregator</div>
+      </div>
+    </div>
+    <div class="node-body">
+      <div class="row">
+        <span class="rk">format</span>
+        <span class="rv">ticker | name | price | RSI | SMA | MACD</span>
+      </div>
+      <div class="row">
+        <span class="rk">includes</span>
+        <span class="rv">analyst target · upside% · EPS</span>
+      </div>
+      <div class="row">
+        <span class="rk">includes</span>
+        <span class="rv">news catalyst · thesis · conviction 1-10</span>
+      </div>
+      <div class="row"><span class="pill p-blue">agent output</span></div>
+    </div>
+  </div>
+
+</div><!-- /flow -->
+</div><!-- /canvas -->
+
+<script>
+// stagger all animated elements
+document.querySelectorAll('[style*="animation-delay"]').forEach((el,i) => {
+  // already handled via inline style
+});
+</script>
+</body>
+</html>
