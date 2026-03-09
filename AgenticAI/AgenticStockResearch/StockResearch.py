@@ -12,7 +12,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
-
+import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -50,15 +50,22 @@ CUTOFF_48H: str   = (
     datetime.now(timezone.utc) - timedelta(hours=48)
 ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-SECTOR_LAUNCH_DELAYS = [0, 20, 40]
+SECTOR_LAUNCH_DELAYS = [0, 5, 10]
 
 SP500_BY_SECTOR: Dict[str, List[str]] = {
-    "technology":  ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AVGO", "ORCL", "CRM", "AMD", "ADBE"],
-    "energy":      ["XOM", "CVX", "COP", "EOG", "SLB", "PSX", "MPC", "VLO", "OXY", "HAL"],
-    "healthcare":  ["JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY", "AMGN", "ISRG"],
-    "finance":     ["BRK-B", "JPM", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP", "C"],
-    "consumer":    ["AMZN", "TSLA", "WMT", "COST", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW"],
-    "industrial":  ["HON", "CAT", "DE", "LMT", "RTX", "GE", "UPS", "FDX", "EMR", "ETN"],
+
+    "technology":  ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AVGO", "ORCL", "CRM", "AMD", "ADBE",
+                    "CRWD", "SNOW", "DDOG", "NET", "PLTR", "TTD", "APP", "HUBS", "ZS", "PANW"],
+    "energy":      ["XOM", "CVX", "COP", "EOG", "SLB", "PSX", "MPC", "VLO", "OXY", "HAL",
+                    "AR", "EQT", "CTRA", "DVN", "CHRD", "RRC", "FANG", "SM"],
+    "healthcare":  ["JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY", "AMGN", "ISRG",
+                    "RXRX", "ACAD", "IONS", "EXAS", "NVCR", "TMDX", "RGEN", "INVA"],
+    "finance":     ["BRK-B", "JPM", "BAC", "WFC", "GS", "MS", "BLK", "SCHW", "AXP", "C",
+                    "HOOD", "SOFI", "AFRM", "NU", "UPST"],
+    "consumer":    ["AMZN", "TSLA", "WMT", "COST", "HD", "MCD", "NKE", "SBUX", "TGT", "LOW",
+                    "BURL", "FIVE", "CHWY", "RH", "WRBY"],
+    "industrial":  ["HON", "CAT", "DE", "LMT", "RTX", "GE", "UPS", "FDX", "EMR", "ETN",
+                    "AXON", "RKLB", "TDG", "HWM", "ACHR"],
 }
 
 SECTOR_RULES = (
@@ -82,9 +89,21 @@ SECTOR_RULES = (
     "\nIf no stock meets all criteria, pick the best available — ALWAYS return at least 3."
 
     "\n\n── OUTPUT FORMAT ──"
-    "\nFor each candidate return:"
-    "\n  ticker | name | price | RSI | SMA verdict | MACD | analyst target | upside%"
-    "\n  | EPS | news catalyst | thesis | risk | conviction 1-10"
+    "\nFor each candidate write a structured block:"
+    "\nTICKER: <ticker>"
+    "\nNAME: <full company name>"
+    "\nPRICE: <exact price from fetch_stock_quote>"
+    "\nSCORE: <X/8>"
+    "\nRSI: <value> | SMA: <verdict> | MACD: <status> | VOLUME: <ratio>x — <signal>"
+    "\nTARGET: <analyst target> | UPSIDE: <upside%> | EPS: <TTM EPS>"
+    "\nCATALYST: <specific headline or 8-K filing title + date — NO generic descriptions>"
+    "\nTHESIS: <3-5 sentences. Explain WHY this stock, WHY NOW. Reference the actual catalyst, "
+    "the technical setup (RSI level, SMA trend, MACD signal, volume confirmation), "
+    "the fundamental picture (EPS, analyst target), and what makes this setup different "
+    "from a normal day. Be specific — name the product, drug, contract, earnings beat, "
+    "or macro tailwind driving this. Do NOT write generic filler.>"
+    "\nRISK: <the single most important thing that could make this trade fail>"
+    "\nCONVICTION: <1-10>"
 )
 
 
@@ -157,6 +176,7 @@ monitor = PipelineMonitor()
 
 LAST_YF_CALL: float = 0.0
 YF_MIN_GAP:   float = 0.35
+_YF_HIST_CACHE: Dict[str, Any] = {}  # ticker → 9mo DataFrame, shared across all tool calls
 
 
 def throttle() -> None:
@@ -167,6 +187,11 @@ def throttle() -> None:
     LAST_YF_CALL = time.monotonic()
 
 
+def _is_terminal_error(exc: Exception) -> bool:
+    """500 internal-error means Yahoo has no data for this ticker — retrying won't help."""
+    return "500" in str(exc) or "internal-error" in str(exc)
+
+
 def yf_info(ticker: str, retries: int = 3) -> dict:
     delay = 1.5
     for attempt in range(retries):
@@ -174,6 +199,8 @@ def yf_info(ticker: str, retries: int = 3) -> dict:
         try:
             return yf.Ticker(ticker).info or {}
         except Exception as exc:
+            if _is_terminal_error(exc):
+                break  # no point retrying — Yahoo has no data for this ticker
             if attempt < retries - 1:
                 time.sleep(delay + random.uniform(0, 0.5))
                 delay *= 2
@@ -181,25 +208,23 @@ def yf_info(ticker: str, retries: int = 3) -> dict:
 
 
 def yf_hist(ticker: str, period: str, retries: int = 3):
-    import pandas as pd
-    delay = 1.5
-    for attempt in range(retries):
-        throttle()
-        try:
-            return yf.Ticker(ticker).history(period=period, auto_adjust=True)
-        except Exception as exc:
-            if attempt < retries - 1:
-                time.sleep(delay + random.uniform(0, 0.5))
-                delay *= 2
-    return pd.DataFrame()
+    if ticker not in _YF_HIST_CACHE:
+        delay = 1.5
+        for attempt in range(retries):
+            throttle()
+            try:
+                _YF_HIST_CACHE[ticker] = yf.Ticker(ticker).history(period="9mo", auto_adjust=True)
+                break
+            except Exception as exc:
+                if _is_terminal_error(exc):
+                    break
+                if attempt < retries - 1:
+                    time.sleep(delay + random.uniform(0, 0.5))
+                    delay *= 2
+        else:
+            return pd.DataFrame()
+    return _YF_HIST_CACHE[ticker]
 
-
-
-class RsiResult(BaseModel):
-    ticker:    str
-    date:      str
-    rsi_value: float
-    signal:    str
 
 
 class InputValidation(BaseModel):
@@ -369,84 +394,6 @@ def fetch_stock_overview(verified_ticker: str) -> str:
         return f"Could not fetch overview for {verified_ticker}: {e}"
 
 
-@function_tool
-def fetch_rsi_signal(verified_ticker: str) -> RsiResult:
-    try:
-        hist = yf_hist(verified_ticker, "90d")
-        if hist.empty or len(hist) < 16:
-            return RsiResult(ticker=verified_ticker, date="N/A", rsi_value=0.0,
-                             signal="Not enough history (need 16+ days)")
-        delta     = hist["Close"].diff()
-        gain      = delta.clip(lower=0).rolling(14).mean()
-        loss      = (-delta.clip(upper=0)).rolling(14).mean()
-        rs        = gain / loss
-        rsi_value = round(float((100 - (100 / (1 + rs))).iloc[-1]), 2)
-        date_str  = hist.index[-1].strftime("%Y-%m-%d")
-        if rsi_value < 30:
-            signal = "OVERSOLD — strong potential buy"
-        elif rsi_value <= 55:
-            signal = "HEALTHY — good entry zone"
-        elif rsi_value <= 65:
-            signal = "ELEVATED — proceed with caution"
-        else:
-            signal = "OVERBOUGHT — avoid"
-        return RsiResult(ticker=verified_ticker, date=date_str, rsi_value=rsi_value, signal=signal)
-    except Exception as e:
-        return RsiResult(ticker=verified_ticker, date="N/A", rsi_value=0.0, signal=f"Error: {e}")
-
-
-@function_tool
-def fetch_sma_trend(verified_ticker: str) -> str:
-    try:
-        hist = yf_hist(verified_ticker, "150d")
-        if hist.empty or len(hist) < 55:
-            return f"Not enough data for SMA on {verified_ticker}"
-        closes    = hist["Close"]
-        sma       = closes.rolling(50).mean()
-        sma_now   = round(float(sma.iloc[-1]),   2)
-        sma_5ago  = round(float(sma.iloc[-6]),   2)
-        price_now = round(float(closes.iloc[-1]), 2)
-        trend     = "RISING" if sma_now > sma_5ago  else "FALLING"
-        position  = "ABOVE"  if price_now > sma_now else "BELOW"
-        verdict   = "BULLISH SETUP" if trend == "RISING" and position == "ABOVE" else "WEAK — avoid"
-        return (
-            f"Ticker: {verified_ticker} | 50-day SMA: ${sma_now} | "
-            f"Trend: {trend} | Price ${price_now} is {position} SMA | Verdict: {verdict}"
-        )
-    except Exception as e:
-        return f"Could not calculate SMA for {verified_ticker}: {e}"
-
-
-@function_tool
-def fetch_macd_signal(verified_ticker: str) -> str:
-    try:
-        hist = yf_hist(verified_ticker, "9mo")
-        if hist.empty or len(hist) < 40:
-            return f"Not enough data for MACD on {verified_ticker}"
-        closes      = hist["Close"]
-        macd_line   = closes.ewm(span=12, adjust=False).mean() - closes.ewm(span=26, adjust=False).mean()
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        histogram   = macd_line - signal_line
-        macd_val    = round(float(macd_line.iloc[-1]),   4)
-        sig_val     = round(float(signal_line.iloc[-1]), 4)
-        hist_val    = round(float(histogram.iloc[-1]),   4)
-        prev_hist   = float(histogram.iloc[-2])
-        if macd_val > sig_val and hist_val > 0 and hist_val > prev_hist:
-            status = "BULLISH CROSSOVER — strong momentum"
-        elif macd_val > sig_val and hist_val > 0:
-            status = "BULLISH — above signal line"
-        elif hist_val > prev_hist:
-            status = "MOMENTUM BUILDING — histogram rising"
-        elif macd_val < sig_val:
-            status = "BEARISH — avoid"
-        else:
-            status = "NEUTRAL"
-        return (
-            f"Ticker: {verified_ticker} | MACD: {macd_val} | "
-            f"Signal: {sig_val} | Histogram: {hist_val} | Status: {status}"
-        )
-    except Exception as e:
-        return f"Could not calculate MACD for {verified_ticker}: {e}"
 
 
 @function_tool
@@ -482,9 +429,9 @@ def fetch_earnings_calendar(verified_ticker: str) -> str:
 def fetch_top_gainers_losers() -> str:
     ALWAYS_EXCLUDE = ["GME", "AMC", "BBBY", "SPCE", "MULN", "RIVN", "LCID", "NKLA"]
     try:
-        watchlist = [t for lst in SP500_BY_SECTOR.values() for t in lst]
-        movers    = []
-        for ticker in watchlist[:30]:
+        watchlist = [t for lst in SP500_BY_SECTOR.values() for t in lst[:8]]
+        movers = []
+        for ticker in watchlist:
             try:
                 hist = yf_hist(ticker, "2d")
                 if hist.empty or len(hist) < 2:
@@ -539,10 +486,123 @@ def open_report_in_browser(html_body: str) -> Dict[str, str]:
     return {"status": "ok", "path": tmp_path, "backup": cwd_path}
 
 
+@function_tool
+def fetch_edgar_8k(topic: str) -> str:
+    """Fetch real-time SEC 8-K filings from EDGAR (free, no API key needed)."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime("%Y-%m-%d")
+    query = urllib.parse.quote(topic)
+    url   = (
+        f"https://efts.sec.gov/LATEST/search-index?q={query}"
+        f"&forms=8-K&dateRange=custom&startdt={since}"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "StockResearch contact@example.com"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode())
+        hits = data.get("hits", {}).get("hits", [])
+        if not hits:
+            return f"No recent 8-K filings found for '{topic}' in the last 48h."
+        lines = []
+        for h in hits[:10]:
+            src = h.get("_source", {})
+            lines.append(
+                f"[{src.get('file_date', '?')}] {src.get('entity_name', '?')} "
+                f"— 8-K filed | Period: {src.get('period_of_report', '?')}"
+            )
+        return f"Recent SEC 8-K filings for '{topic}':\n" + "\n".join(lines)
+    except Exception as e:
+        return f"EDGAR fetch failed for '{topic}': {e}"
+
+
+@function_tool
+def fetch_technical_summary(verified_ticker: str) -> str:
+    """RSI + SMA + MACD + Volume in one call — replaces 4 separate tool calls."""
+    try:
+        hist = yf_hist(verified_ticker, "9mo")
+        if hist.empty or len(hist) < 55:
+            return f"Not enough data for technical analysis on {verified_ticker}"
+        closes = hist["Close"]
+        volume = hist["Volume"]
+
+        # RSI
+        delta = closes.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 0
+        rsi   = round(100 - (100 / (1 + rs)), 1)
+        if rsi < 30:   rsi_sig = "OVERSOLD — potential bounce"
+        elif rsi < 55: rsi_sig = "HEALTHY — good entry zone"
+        elif rsi < 65: rsi_sig = "ELEVATED — momentum slowing"
+        else:          rsi_sig = "OVERBOUGHT — avoid"
+
+        # SMA
+        sma_now  = round(float(closes.rolling(50).mean().iloc[-1]), 2)
+        sma_5ago = round(float(closes.rolling(50).mean().iloc[-6]), 2)
+        price    = round(float(closes.iloc[-1]), 2)
+        sma_trend    = "RISING" if sma_now > sma_5ago else "FALLING"
+        sma_position = "ABOVE"  if price > sma_now    else "BELOW"
+        sma_verdict  = "BULLISH SETUP" if sma_trend == "RISING" and sma_position == "ABOVE" else "WEAK — avoid"
+
+        # MACD
+        macd_line   = closes.ewm(span=12, adjust=False).mean() - closes.ewm(span=26, adjust=False).mean()
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        hist_val    = float((macd_line - signal_line).iloc[-1])
+        prev_hist   = float((macd_line - signal_line).iloc[-2])
+        macd_val    = float(macd_line.iloc[-1])
+        sig_val     = float(signal_line.iloc[-1])
+        if macd_val > sig_val and hist_val > 0 and hist_val > prev_hist:
+            macd_status = "BULLISH CROSSOVER — strong momentum"
+        elif macd_val > sig_val and hist_val > 0:
+            macd_status = "BULLISH — above signal line"
+        elif hist_val > prev_hist:
+            macd_status = "MOMENTUM BUILDING — histogram rising"
+        elif macd_val < sig_val:
+            macd_status = "BEARISH — avoid"
+        else:
+            macd_status = "NEUTRAL"
+
+        # Volume
+        avg_vol   = float(volume.iloc[:-1].tail(20).mean())
+        today_vol = float(volume.iloc[-1])
+        ratio     = round(today_vol / avg_vol, 1) if avg_vol > 0 else 0
+        if ratio >= 2.0:   vol_sig = "STRONG BREAKOUT VOLUME"
+        elif ratio >= 1.5: vol_sig = "ELEVATED — move confirmed"
+        elif ratio >= 0.8: vol_sig = "NORMAL"
+        else:              vol_sig = "LOW — weak conviction"
+
+        return (
+            f"Ticker: {verified_ticker}\n"
+            f"RSI: {rsi} — {rsi_sig}\n"
+            f"SMA50: ${sma_now} | Trend: {sma_trend} | Price ${price} {sma_position} SMA | {sma_verdict}\n"
+            f"MACD: {round(macd_val,4)} | Signal: {round(sig_val,4)} | {macd_status}\n"
+            f"Volume: {int(today_vol):,} | 20d Avg: {int(avg_vol):,} | Ratio: {ratio}x | {vol_sig}"
+        )
+    except Exception as e:
+        return f"Technical analysis failed for {verified_ticker}: {e}"
+
+
+@function_tool
+def fetch_ticker_news(verified_ticker: str) -> str:
+    """Real-time Yahoo Finance news for a specific ticker — no API key, no delay."""
+    try:
+        articles = yf.Ticker(verified_ticker).news or []
+        if not articles:
+            return f"No recent news found for {verified_ticker}."
+        lines = []
+        for a in articles[:8]:
+            pub  = datetime.fromtimestamp(a.get("providerPublishTime", 0)).strftime("%Y-%m-%d")
+            src  = a.get("publisher", "")
+            title = a.get("title", "")
+            lines.append(f"[{pub}] {title} | {src}")
+        return f"Yahoo Finance news for {verified_ticker}:\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Could not fetch news for {verified_ticker}: {e}"
+
+
 ALL_TOOLS = [
     resolve_ticker, fetch_market_news, fetch_stock_quote, fetch_stock_overview,
-    fetch_rsi_signal, fetch_sma_trend, fetch_macd_signal, fetch_earnings_calendar,
-    fetch_top_gainers_losers, fetch_sp500_sector_tickers, debug_yfinance,
+    fetch_earnings_calendar, fetch_top_gainers_losers, fetch_sp500_sector_tickers,
+    debug_yfinance, fetch_edgar_8k, fetch_ticker_news, fetch_technical_summary,
 ]
 
 
@@ -633,7 +693,7 @@ judge_agent = Agent(
         "If approved, set critique to empty string."
     ),
     output_type=JudgeVerdict,
-    model="gpt-4o-mini",
+    model="gpt-4o",
 )
 
 
@@ -644,16 +704,17 @@ def make_analyst(name: str, sector_label: str, news_query: str, fallback_sector:
             f"You are a specialist equity analyst for {sector_label} stocks."
             f"\n\nPLANNING LOOP — follow these steps in order:"
             f"\nSTEP 1: Call fetch_top_gainers_losers() → save the exclusion list."
-            f"\nSTEP 2: Call fetch_market_news('{news_query}')."
-            f"\nSTEP 3: Extract 6-8 company names from the headlines."
-            f"\nSTEP 4: Call resolve_ticker(name) for each company."
+            f"\nSTEP 2: Call fetch_edgar_8k('{news_query}') for real-time SEC filings."
+            f"\nSTEP 3: Call fetch_market_news('{news_query}') for additional news context."
+            f"\nSTEP 4: Extract 6-8 company names from the filings + headlines."
+            f"\nSTEP 5: Call resolve_ticker(name) for each company."
             f"         Keep only VERIFIED results."
             f"         If fewer than 3 are VERIFIED → call fetch_sp500_sector_tickers('{fallback_sector}')"
             f"         and resolve_ticker on each until you have ≥4 verified tickers."
-            f"\nSTEP 5: Remove any tickers on the exclusion list."
-            f"\nSTEP 6: For each remaining VERIFIED ticker run IN ORDER:"
-            f"         fetch_stock_quote → fetch_stock_overview → fetch_rsi_signal"
-            f"         → fetch_sma_trend → fetch_macd_signal → fetch_earnings_calendar."
+            f"\nSTEP 6: Remove any tickers on the exclusion list."
+            f"\nSTEP 7: For each remaining VERIFIED ticker run IN ORDER:"
+            f"         fetch_ticker_news → fetch_stock_quote → fetch_stock_overview"
+            f"         → fetch_technical_summary → fetch_earnings_calendar."
             + SECTOR_RULES
         ),
         tools=ALL_TOOLS,
@@ -687,15 +748,15 @@ macro_news_analyst = Agent(
     name="MacroNewsAnalyst",
     instructions=(
         "You are a macro market analyst setting context for tomorrow's trading session."
-        "\nSTEP 1: Call fetch_market_news('Federal Reserve interest rates inflation CPI')."
-        "\nSTEP 2: Call fetch_market_news('S&P 500 Nasdaq market outlook earnings season')."
-        "\nSTEP 3: Call fetch_market_news('corporate earnings guidance Wall Street analyst')."
+        "\nSTEP 1: Call fetch_edgar_8k('earnings revenue guidance outlook') for real-time SEC filings."
+        "\nSTEP 2: Call fetch_market_news('Federal Reserve interest rates inflation CPI')."
+        "\nSTEP 3: Call fetch_market_news('S&P 500 Nasdaq market outlook earnings season')."
         "\nSTEP 4: Call fetch_top_gainers_losers() to gauge today's risk appetite."
         "\nWrite 300-500 words: overall sentiment, key tailwinds, key headwinds, "
-        "which sectors look favored, top 2-3 risks to watch. Cite specific headlines."
+        "which sectors look favored, top 2-3 risks to watch. Cite specific headlines and 8-K filings."
     ),
-    tools=[fetch_market_news, fetch_top_gainers_losers],
-    model="gpt-4o-mini",
+    tools=[fetch_market_news, fetch_top_gainers_losers, resolve_ticker, fetch_edgar_8k],
+    model="gpt-4o",
     model_settings=ModelSettings(temperature=0),
 )
 
@@ -703,17 +764,25 @@ top5_stock_picker = Agent(
     name="Top5StockPicker",
     instructions=(
         "You are a senior portfolio manager selecting stocks for tomorrow's open. "
-        "You receive research from 3 sector analysts and a macro backdrop. "
+        "You receive structured research blocks from 3 sector analysts and a macro backdrop. "
         "All tickers are verified. All prices are real — copy them exactly, never change them."
+        "\n\nCRITICAL THESIS RULE: Every pick's investment thesis MUST be built directly from "
+        "the analyst's THESIS field. Quote or paraphrase the specific catalyst, technical setup, "
+        "and fundamental data the analyst cited. Do NOT write generic statements like "
+        "'this company has strong fundamentals' or 'the stock looks technically healthy'. "
+        "Every thesis must answer: what specific event happened, what do the technicals show, "
+        "and why does this create a near-term opportunity? If the analyst thesis is thin, "
+        "say so honestly rather than padding it with vague language."
 
-        "\n\nSCORING MATRIX — score every candidate on these 7 criteria (1 point each):"
+        "\n\nSCORING MATRIX — score every candidate on these 8 criteria (1 point each):"
         "\n  [1] RSI between 30-55"
         "\n  [2] 50-day SMA RISING and price ABOVE it"
         "\n  [3] MACD BULLISH or histogram rising"
         "\n  [4] Analyst target ≥5% above current price"
         "\n  [5] Positive EPS (TTM)"
-        "\n  [6] Real news catalyst from last 48h"
+        "\n  [6] Real news catalyst or SEC 8-K filing from last 48h"
         "\n  [7] NOT on the exclusion list"
+        "\n  [8] Volume ratio ≥1.5x 20-day average (ELEVATED or STRONG BREAKOUT)"
         "\nReject stocks scoring 2 or below. Rank the rest. Pick the top 5."
 
         "\n\nMINIMUM OUTPUT RULE (this is mandatory, never skip it):"
@@ -725,15 +794,20 @@ top5_stock_picker = Agent(
         "\n\nFOR EACH PICK include:"
         "\n  1. Ticker + full company name (exactly as from research)"
         "\n  2. Current price (copy exactly — never round or change)"
-        "\n  3. Score X/7 and which criteria were met"
+        "\n  3. Score X/8 and which criteria were met"
         "\n  4. RSI value + signal, SMA verdict, MACD status"
-        "\n  5. Analyst target + upside %"
-        "\n  6. EPS (TTM)"
-        "\n  7. News catalyst (specific headline + date)"
-        "\n  8. Investment thesis (why this stock, why NOW)"
-        "\n  9. Key risk"
-        "\n 10. Entry strategy: buy at open / limit at $X / wait for dip to $Y"
-        "\n 11. Conviction: HIGH (6-7/7) or MEDIUM (4-5/7)"
+        "\n  5. Volume ratio vs 20-day avg + signal (STRONG/ELEVATED/NORMAL/LOW)"
+        "\n  6. Analyst target + upside %"
+        "\n  7. EPS (TTM)"
+        "\n  8. News catalyst or SEC 8-K filing (copy exact headline/filing title + date from analyst)"
+        "\n  9. Analyst sector summary — 1 sentence on why this sector analyst flagged this stock"
+        "\n 10. Investment thesis — 4-6 sentences minimum. MUST reference: the specific catalyst "
+        "by name, the RSI/SMA/MACD/volume readings and what they mean together, the upside to "
+        "analyst target, and why the timing is NOW vs last week or next month. "
+        "No vague language. If you cannot write a specific thesis, mark conviction MEDIUM or lower."
+        "\n 11. Key risk — be specific (e.g. 'earnings miss on March 15' not 'market risk')"
+        "\n 12. Entry strategy: buy at open / limit at $X / wait for dip to $Y"
+        "\n 13. Conviction: HIGH (7-8/8) or MEDIUM (5-6/8)"
 
         f"\n\nFORMAT: Output a complete self-contained HTML page. Today's date is {TODAY}."
         f"\n\nDESIGN SPEC — follow exactly:"
@@ -745,12 +819,12 @@ top5_stock_picker = Agent(
         f"\n    - HIGH conviction → top bar green (#22c55e)"
         f"\n    - MEDIUM conviction → top bar yellow (#f59e0b)"
         f"\n• Inside each pick card layout:"
-        f"\n    Row 1: Ticker in large bold (24px accent blue) + company name + price in large white + score badge (e.g. '6/7') + Conviction label (HIGH or MEDIUM) in matching color"
-        f"\n    Row 2: Three inline signal badges — RSI badge, SMA badge, MACD badge."
-        f"\n        Badge colors: BULLISH/HEALTHY/OVERSOLD → green bg. ELEVATED/NEUTRAL → yellow bg. BEARISH/OVERBOUGHT/WEAK → red bg."
+        f"\n    Row 1: Ticker in large bold (24px accent blue) + company name + price in large white + score badge (e.g. '6/8') + Conviction label (HIGH or MEDIUM) in matching color"
+        f"\n    Row 2: Four inline signal badges — RSI badge, SMA badge, MACD badge, Volume badge."
+        f"\n        Badge colors: BULLISH/HEALTHY/OVERSOLD/STRONG/ELEVATED → green bg. NORMAL/NEUTRAL → yellow bg. BEARISH/OVERBOUGHT/WEAK/LOW → red bg."
         f"\n    Row 3: Two columns — left: Analyst target + upside % + EPS. Right: Entry strategy (e.g. 'Buy at open' or 'Limit at $X')."
         f"\n    Row 4: Business summary — 1-2 sentence description of what the company does."
-        f"\n    Row 5: News catalyst — 📰 icon + specific headline in italic + date."
+        f"\n    Row 5: Catalyst — 📰 icon + specific headline or SEC 8-K filing in italic + date."
         f"\n    Row 6: Investment thesis paragraph — why this stock, why NOW."
         f"\n    Row 7: Key risk in a red-tinted box."
         f"\n• Footer: dark bar with legal disclaimer in small muted text."
@@ -893,7 +967,7 @@ def save_memory(picks_summary: str, score: int) -> None:
             "score": score
         })
         with open(MEMORY_FILE, "w") as f:
-            json.dump(records[-10:], f, indent=2)  # keep last 10 runs
+            json.dump(records[-10:], f, indent=2)
     except Exception as e:
         log.warning("Could not save memory: %s", e)
 
@@ -952,9 +1026,9 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
     monitor.start("parallel_research")
     with trace("Parallel Sector Research"):
         results = await asyncio.gather(
-            staggered_sector(tech_sector_analyst,       research_prompt, 50, "tech_sector",       SECTOR_LAUNCH_DELAYS[0]),
-            staggered_sector(energy_sector_analyst,     research_prompt, 50, "energy_sector",     SECTOR_LAUNCH_DELAYS[1]),
-            staggered_sector(healthcare_sector_analyst, research_prompt, 50, "healthcare_sector", SECTOR_LAUNCH_DELAYS[2]),
+            staggered_sector(tech_sector_analyst,       research_prompt, 70, "tech_sector",       SECTOR_LAUNCH_DELAYS[0]),
+            staggered_sector(energy_sector_analyst,     research_prompt, 70, "energy_sector",     SECTOR_LAUNCH_DELAYS[1]),
+            staggered_sector(healthcare_sector_analyst, research_prompt, 70, "healthcare_sector", SECTOR_LAUNCH_DELAYS[2]),
             run_with_429_retry(macro_news_analyst, "Provide the macro backdrop for tomorrow.", 15, "macro"),
             return_exceptions=True,
         )
