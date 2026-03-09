@@ -240,7 +240,7 @@ class OutputValidation(BaseModel):
 
 
 class JudgeVerdict(BaseModel):
-    score:           int    # Overall quality 1-10. We need 7+ to approve.
+    score:           int    # Overall quality 1-10. We need 8+ to approve.
     has_min_picks:   bool   # True if report has at least 3 real stock picks
     prices_present:  bool   # True if every pick has a real dollar price
     no_placeholders: bool   # True if no '[Insert X]' placeholder text remains
