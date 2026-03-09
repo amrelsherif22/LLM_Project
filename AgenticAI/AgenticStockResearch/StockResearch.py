@@ -228,13 +228,15 @@ def yf_hist(ticker: str, period: str, retries: int = 3):
 
 
 class InputValidation(BaseModel):
-    is_valid: bool
-    reason:   str
+    reasoning: str   # step-by-step analysis before verdict
+    is_valid:  bool
+    reason:    str
 
 
 class OutputValidation(BaseModel):
-    is_valid: bool
-    reason:   str
+    reasoning: str   # step-by-step analysis before verdict
+    is_valid:  bool
+    reason:    str
 
 
 class JudgeVerdict(BaseModel):
@@ -610,12 +612,30 @@ ALL_TOOLS = [
 input_guardrail_agent = Agent(
     name="InputGuardrailAgent",
     instructions=(
-        "You validate user requests for a stock research tool. "
-        "Approve (is_valid=True) anything related to: stocks, investing, markets, "
-        "financial research, trading, portfolio analysis, earnings, or macro economy. "
-        "Reject (is_valid=False) ONLY if the request has nothing to do with finance "
-        "(e.g. recipes, essays) OR explicitly asks for something illegal like insider trading. "
-        "When in doubt — approve."
+        "You are a compliance guardrail for a stock research tool. "
+        "Your job is to reason carefully about the user's request before deciding whether to approve or reject it.\n\n"
+
+        "STEP 1 — TOPIC CHECK: Is this request related to stocks, markets, investing, financial research, "
+        "trading, portfolio analysis, earnings, macro economy, or sector analysis? "
+        "If it has nothing to do with finance (e.g. recipes, creative writing, essays) → is_valid=False.\n\n"
+
+        "STEP 2 — INSIDER TRADING CHECK: Does the request ask for help with insider trading? "
+        "Insider trading requests include:\n"
+        "  - Trading on material non-public information (MNPI) such as unreleased earnings, M&A deals, or FDA decisions\n"
+        "  - How to profit from confidential corporate information before it is made public\n"
+        "  - How to share or tip others with inside information\n"
+        "  - How to conceal trades or evade SEC/FINRA detection\n\n"
+
+        "THESE ARE LEGITIMATE AND MUST BE APPROVED:\n"
+        "  - Educational questions about what insider trading is or how securities law works\n"
+        "  - Questions about SEC regulations, blackout periods, or compliance obligations\n"
+        "  - Requests to research publicly available financial data, news, or earnings\n"
+        "  - Any request using only public market data — price targets, analyst ratings, SEC filings, news\n\n"
+
+        "STEP 3 — VERDICT: If STEP 2 identifies a genuine insider trading facilitation request → is_valid=False. "
+        "Otherwise → is_valid=True. When in doubt, approve.\n\n"
+
+        "Always populate 'reasoning' with your step-by-step analysis BEFORE setting is_valid."
     ),
     output_type=InputValidation,
     model="gpt-4o-mini",
@@ -624,12 +644,31 @@ input_guardrail_agent = Agent(
 output_guardrail_agent = Agent(
     name="OutputGuardrailAgent",
     instructions=(
-        "You review an HTML stock research report. "
-        "Return is_valid=False ONLY if the report is completely empty "
-        "or contains nothing but unfilled placeholder text like '[Insert X here]'. "
-        "Return is_valid=True if the report contains ANY real ticker symbol "
-        "(AAPL, MSFT, NVDA, XOM, etc.) — even if some data is missing or partial. "
-        "Your only job is to catch a completely broken/unrendered template."
+        "You review an HTML stock research report for two distinct failure modes. "
+        "Reason step by step before setting is_valid. Always populate 'reasoning' first.\n\n"
+
+        "STEP 1 — COMPLETENESS CHECK:\n"
+        "Is the report completely empty, or does it contain nothing but unfilled placeholder text "
+        "like '[Insert ticker here]' or '[Add analysis]' with no real data? "
+        "If so → is_valid=False with reason explaining it is an empty/broken template.\n\n"
+
+        "STEP 2 — INSIDER TRADING CONTENT CHECK:\n"
+        "Does the report contain any of the following?\n"
+        "  - Advice to trade on material non-public information (MNPI)\n"
+        "  - Guidance on using confidential or non-public earnings, M&A, or regulatory data to make trades\n"
+        "  - Instructions on concealing trades or evading regulatory detection\n"
+        "  - Tips on passing inside information to others for trading advantage\n\n"
+
+        "THESE ARE ACCEPTABLE IN THE REPORT — DO NOT BLOCK:\n"
+        "  - Stock picks based on publicly available data (prices, analyst targets, earnings reports, SEC filings, news)\n"
+        "  - Technical analysis, RSI, MACD, moving averages\n"
+        "  - Analyst price targets and consensus ratings\n"
+        "  - Macro economic commentary\n"
+        "  - Risk disclosures or compliance notes\n\n"
+
+        "STEP 3 — VERDICT:\n"
+        "If STEP 1 OR STEP 2 triggers → is_valid=False. "
+        "If the report contains real tickers with publicly-sourced analysis and no MNPI guidance → is_valid=True."
     ),
     output_type=OutputValidation,
     model="gpt-4o-mini",
@@ -1047,18 +1086,12 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
     def sector_failed(output: str) -> bool:
         return output.strip().startswith("[") and "unavailable" in output
 
-    if all(sector_failed(o) for o in [tech_out, energy_out, healthcare_out]):
-        monitor.start("sector_fallback")
-        fallback_tickers = (
-            SP500_BY_SECTOR["technology"][:4]
-            + SP500_BY_SECTOR["energy"][:3]
-            + SP500_BY_SECTOR["healthcare"][:3]
-        )
-        fallback_lines = [
-            "⚠️  Sector agents unavailable. Fallback data built directly from yfinance:",
-            ""
-        ]
-        for tkr in fallback_tickers:
+    def sector_fallback_for(sector_key: str, label: str, n: int) -> str:
+        monitor.start(f"sector_fallback_{sector_key}")
+        tickers = SP500_BY_SECTOR[sector_key][:n]
+        lines = [f"⚠️  {sector_key.title()} agent unavailable. Fallback data built directly from yfinance:", ""]
+        recovered = 0
+        for tkr in tickers:
             try:
                 hist = yf_hist(tkr, "2d")
                 if hist.empty:
@@ -1071,18 +1104,22 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
                     f"{round(((float(target) - price) / price) * 100, 1)}%"
                     if target and price > 0 else "N/A"
                 )
-                fallback_lines.append(
+                lines.append(
                     f"  {tkr} | {name} | Price: ${price} | "
                     f"Analyst Target: ${target} | Upside: {upside}"
                 )
+                recovered += 1
             except Exception as exc:
                 log.warning("Fallback data failed for %s: %s", tkr, exc)
+        monitor.ok(f"sector_fallback_{sector_key}", f"{recovered}/{n} tickers recovered")
+        return "\n".join(lines)
 
-        fallback_text  = "\n".join(fallback_lines)
-        tech_out       = fallback_text
-        energy_out     = "(included in fallback block above)"
-        healthcare_out = "(included in fallback block above)"
-        monitor.ok("sector_fallback", f"{len(fallback_tickers)} tickers")
+    if sector_failed(tech_out):
+        tech_out = sector_fallback_for("technology", "tech_sector", 4)
+    if sector_failed(energy_out):
+        energy_out = sector_fallback_for("energy", "energy_sector", 3)
+    if sector_failed(healthcare_out):
+        healthcare_out = sector_fallback_for("healthcare", "healthcare_sector", 3)
 
     combined = f"""
 STOCK RESEARCH PACKAGE — {TODAY}
