@@ -32,6 +32,7 @@ from agents.exceptions import (
     InputGuardrailTripwireTriggered,
     OutputGuardrailTripwireTriggered,
 )
+from agents.mcp import MCPServerStdio
 
 
 
@@ -44,13 +45,27 @@ logging.basicConfig(
 )
 log = logging.getLogger("StockResearch")
 
-NEWS_API_KEY: str = os.environ.get("NEWS_API_KEY", "")
-TODAY: str        = datetime.now().strftime("%B %d, %Y")
-CUTOFF_48H: str   = (
+NEWS_API_KEY:  str = os.environ.get("NEWS_API_KEY", "")
+BRAVE_API_KEY: str = os.environ.get("BRAVE_API_KEY", "")
+TODAY: str         = datetime.now().strftime("%B %d, %Y")
+CUTOFF_48H: str    = (
     datetime.now(timezone.utc) - timedelta(hours=48)
 ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 SECTOR_LAUNCH_DELAYS = [0, 5, 10]
+
+_NPX = "npx.cmd" if os.name == "nt" else "npx"
+
+brave_mcp = MCPServerStdio(
+    params={
+        "command": _NPX,
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "env": {"BRAVE_API_KEY": BRAVE_API_KEY},
+    },
+    cache_tools_list=True,
+    name="BraveSearch",
+) if BRAVE_API_KEY else None
+
 
 SP500_BY_SECTOR: Dict[str, List[str]] = {
 
@@ -737,6 +752,11 @@ judge_agent = Agent(
 
 
 def make_analyst(name: str, sector_label: str, news_query: str, fallback_sector: str) -> Agent:
+    brave_step = (
+        f"\nSTEP 2b: Call brave_search('{news_query} stock catalyst earnings analyst upgrade {TODAY}') "
+        f"for real-time web results. Extract any additional company names or dated catalysts found."
+    ) if brave_mcp else ""
+
     return Agent(
         name=name,
         instructions=(
@@ -744,6 +764,7 @@ def make_analyst(name: str, sector_label: str, news_query: str, fallback_sector:
             f"\n\nPLANNING LOOP — follow these steps in order:"
             f"\nSTEP 1: Call fetch_top_gainers_losers() → save the exclusion list."
             f"\nSTEP 2: Call fetch_edgar_8k('{news_query}') for real-time SEC filings."
+            + brave_step +
             f"\nSTEP 3: Call fetch_market_news('{news_query}') for additional news context."
             f"\nSTEP 4: Extract 6-8 company names from the filings + headlines."
             f"\nSTEP 5: Call resolve_ticker(name) for each company."
@@ -757,6 +778,7 @@ def make_analyst(name: str, sector_label: str, news_query: str, fallback_sector:
             + SECTOR_RULES
         ),
         tools=ALL_TOOLS,
+        mcp_servers=[brave_mcp] if brave_mcp else [],
         model="gpt-4o-mini",
         model_settings=ModelSettings(temperature=0),
     )
@@ -1062,15 +1084,27 @@ async def run_stock_research_pipeline(user_prompt: Optional[str] = None) -> None
             monitor.err(label, str(exc))
             raise
 
-    monitor.start("parallel_research")
-    with trace("Parallel Sector Research"):
-        results = await asyncio.gather(
+    if brave_mcp:
+        log.info("Brave Search MCP enabled — sector agents will use web search.")
+    else:
+        log.info("BRAVE_API_KEY not set — running without web search.")
+
+    async def run_parallel_research():
+        return await asyncio.gather(
             staggered_sector(tech_sector_analyst,       research_prompt, 70, "tech_sector",       SECTOR_LAUNCH_DELAYS[0]),
             staggered_sector(energy_sector_analyst,     research_prompt, 70, "energy_sector",     SECTOR_LAUNCH_DELAYS[1]),
             staggered_sector(healthcare_sector_analyst, research_prompt, 70, "healthcare_sector", SECTOR_LAUNCH_DELAYS[2]),
             run_with_429_retry(macro_news_analyst, "Provide the macro backdrop for tomorrow.", 15, "macro"),
             return_exceptions=True,
         )
+
+    monitor.start("parallel_research")
+    with trace("Parallel Sector Research"):
+        if brave_mcp:
+            async with brave_mcp:
+                results = await run_parallel_research()
+        else:
+            results = await run_parallel_research()
     monitor.ok("parallel_research")
 
     def safe(result, label: str) -> str:
